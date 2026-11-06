@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SG3000 · 采集中控台</title><link rel="stylesheet" href="/style.css"></head>
+<body>
+<aside class="rail">
+  <div class="brand"><span class="brand-mark">▥</span><div>GLASS LAB<small>玻璃检测 · 采集工作站</small></div></div>
+  <div class="rail-label">WORKBENCH / 01</div>
+  <nav aria-label="主导航">
+    <button class="nav" data-view="defect-view"><span>00</span>离线检测</button>
+    <button class="nav active" data-view="control"><span>01</span>采集控制</button>
+    <button class="nav" data-view="source"><span>02</span>核心代码</button>
+    <button class="nav" data-view="history"><span>03</span>历史与验证</button>
+    <button class="nav" data-view="guide"><span>04</span>操作指南</button>
+  </nav>
+  <div class="rail-bottom"><span class="tiny-dot"></span> 本机控制 · 串口连接<p>ZCU102 / SG3000<br>16K · 分块预处理 · 候选合并</p><div class="version">集成中控台 0.4 / 首图离线处理</div></div>
+</aside>
+<main>
+  <header><div class="breadcrumb">玻璃检测凌云光方案实践 <span>/</span> <b id="crumb">采集控制</b></div><div id="service" class="service">本机服务连接中</div></header>
+  <section id="defect-view" class="view">
+    <div class="title-row"><div><div class="eyebrow">LINE SCAN / DEFECT EXPLORER</div><h1>跨过分块，看清候选。</h1><p class="subtitle">处理合成输入或本地 Mono8 图像。点选候选，检查块边界附近的细节。</p></div><span class="chip amber">电脑离线处理 · 未验证硬件来源</span></div>
+    <section class="panel demo-controls"><div class="section-title"><div><h2>运行离线预处理</h2><p>使用原生 C++ 在电脑执行，自动接入跨条带合并；保留输入来源和全局坐标。</p></div><span id="defect-status" class="chip" role="status">尚未运行</span></div>
+      <div class="stream-form defect-source-form"><label>输入来源<select id="defect-source"><option value="defects">16K 合成输入</option><option value="frames">本地导入 PGM</option></select></label><label id="defect-upload-label" class="file-button">导入 P5 Mono8<input id="defect-upload" type="file" accept=".pgm,image/x-portable-graymap"></label><label id="defect-input-group" hidden>已导入图像<select id="defect-input"><option value="">选择已导入图像</option></select></label><span class="defect-upload-note">最多 8 MiB 像素；复制相机首图到电脑后从此导入。</span></div><div class="stream-form"><label>邻域半径<select id="defect-radius"><option value="7">7 · 15 × 15</option><option value="3">3 · 7 × 7</option><option value="1">1 · 3 × 3</option><option value="0">0 · 仅中心像素</option></select></label><label>响应阈值<input id="defect-threshold" type="number" min="1" max="255" value="25"></label><label>候选极性<select id="defect-polarity"><option value="both">亮 + 暗</option><option value="bright">仅亮候选 · 暗场起点</option><option value="dark">仅暗候选</option></select></label><button id="defect-start" class="primary">运行 16K 离线演示</button><button id="defect-replay">回放随包结果</button></div>
+      <div class="demo-note" id="defect-message" role="status">核心块 256 × 64，上下左右保留邻域。计算完成后只输出核心区，避免重复统计。</div>
+    </section>
+    <div class="defect-metrics"><div><small>图像尺寸</small><strong id="defect-dimensions">—</strong></div><div><small>候选数量</small><strong id="defect-count">—</strong></div><div><small>输入缓存峰值</small><strong id="defect-cache">—</strong></div><div><small>结果性质</small><strong>候选 · 未作质量判定</strong></div></div>
+    <section class="panel defect-inspector"><div class="section-title"><h2>全宽定位图</h2><div class="defect-tools"><label for="defect-runs">记录</label><select id="defect-runs"><option value="">尚无结果</option></select><button id="defect-export" disabled>导出候选 JSON</button></div></div>
+      <div class="defect-provenance" id="defect-provenance">每份结果保留执行来源和参数。离线回放不会改变硬件连接状态。</div>
+      <div class="strip-stage"><canvas id="defect-overview" width="2048" height="240" aria-label="全宽候选定位图"></canvas><div id="defect-empty" class="strip-empty">运行一次任务，或手动选择历史记录</div></div><div class="strip-scale"><span>x = 0</span><span>全宽定位 · 纵向放大显示 · <b class="bright-key">亮</b> / <b class="dark-key">暗</b></span><span id="defect-axis">x = —</span></div>
+      <div class="defect-detail-grid"><div class="candidate-list"><div class="candidate-heading"><h3>候选列表</h3><span id="defect-page">—</span></div><div class="candidate-scroll"><table><thead><tr><th>候选</th><th>起点 x / y</th><th>面积</th><th>峰值</th></tr></thead><tbody id="defect-rows"></tbody></table></div><div class="candidate-pagination"><button id="defect-prev" disabled>上一页</button><button id="defect-next" disabled>下一页</button></div></div>
+      <div class="candidate-detail"><div class="candidate-heading"><h3 id="defect-selected">选择候选查看局部</h3><select id="defect-layer" aria-label="定位图与局部图层" disabled><option value="source" disabled>导入原始图</option><option value="corrected" selected>校正灰度图</option><option value="mask">候选掩膜</option></select></div><canvas id="defect-crop" width="512" height="180" aria-label="候选原像素裁剪"></canvas><p id="defect-coordinates">坐标来自原始全宽图像，裁剪不参与算法计算。</p><div class="inline-note">细框为候选范围；虚线为 x=256 / y=64 等核心分块边界。只有显示缩放，算法没有缩小输入。</div></div></div>
+    </section>
+    <section class="panel integration-note"><div><div class="eyebrow">NEXT CONNECTION</div><h2>相机首图到电脑后，从导入开始。</h2><p>已接通：本地 P5 Mono8 文件 → 原生预处理 → 全局坐标候选 → 定位与局部查看。请先在采集端保存首图、复制到电脑，再导入离线检测。文件导入不证明 DMA / PL 或相机链路已通过。</p></div><div><button data-file="firstframe">第一帧操作顺序 →</button><button data-file="frames">真实文件接口 →</button><button data-file="frameschema">候选数据格式 →</button><button data-file="tilecontract">FPGA 模块合同 →</button></div></section>
+  </section>
+  <section id="control" class="view active">
+    <div class="title-row"><div><div class="eyebrow">ACQUISITION CONTROL</div><h1>看见每一步采集。</h1><p class="subtitle">从板卡连接到图像接收，让状态、操作与代码都可追溯。</p></div><span class="chip" id="connection-chip">未连接硬件</span></div>
+    <div class="connection panel"><div><h2>连接实验台</h2><p>J83 USB 串口 · 115200 / 8N1</p></div><div class="connection-fields"><label for="port">串口</label><select id="port"><option value="">正在查找串口…</option></select><button id="refresh" class="icon-button" title="刷新串口" aria-label="刷新串口">↻</button><button id="connect" class="primary">连接</button><button id="disconnect" disabled>断开</button></div><div class="connection-note" id="port-note">不会自动连接。请勿与其他串口调试程序同时使用同一端口。</div></div>
+    <div class="chain" aria-label="采集链路">
+      <div><span class="step-number">01</span><strong>ZCU102 / Linux</strong><small id="linux-state">等待检查</small></div><span class="chain-arrow">→</span>
+      <div><span class="step-number">02</span><strong>PCIe / SG3000</strong><small id="pci-state">等待检查</small></div><span class="chain-arrow">→</span>
+      <div><span class="step-number">03</span><strong>Camera Link / CL1</strong><small id="clock-state">等待信号检查</small></div><span class="chain-arrow">→</span>
+      <div><span class="step-number">04</span><strong>DMA / 图像</strong><small id="dma-state">尚未采集</small></div>
+    </div>
+    <div class="work-grid">
+      <section class="panel actions"><div class="section-title"><h2>操作序列</h2><span>由上到下</span></div>
+        <button id="wake" class="action" disabled><b>00</b><div><strong>唤醒终端</strong><small>发送回车，等待 Linux root 提示符</small></div><span>↵</span></button>
+        <button data-action="probe" class="action" disabled><b>01</b><div><strong>检查板卡</strong><small>板型、内核、PCIe 身份和 SD 卡</small></div><span>↗</span></button>
+        <button data-action="prepare" class="action" disabled><b>02</b><div><strong>从 SD 加载接收程序</strong><small>只读挂载、校验文件、加载驱动</small></div><span>↗</span></button>
+        <button data-action="preflight" class="action" disabled><b>03</b><div><strong>检查采集条件</strong><small>读取 DDR、CL1 时钟与图像格式</small></div><span>↗</span></button>
+        <button data-action="capture" class="action capture" disabled><b>04</b><div><strong>采集一帧</strong><small>极速单帧采集 · 保存至板上内存</small></div><span>↗</span></button>
+        <button data-action="fetch_last" class="action" disabled><b>05</b><div><strong>回传最新图像到 D 盘</strong><small>USB 快速传输至 D:\SG3000_Captures</small></div><span>📥</span></button>
+        <div class="action-footer"><button data-action="dmesg" disabled>读取内核日志</button><button data-action="release" disabled>卸载接收驱动</button></div>
+      </section>
+      <section class="panel observation"><div class="section-title"><h2>当前观察</h2><span id="observed-at">尚无本次实测</span></div>
+        <div id="state-message" class="state-message"><div class="state-icon">◎</div><h3>离线也可以开始了解项目</h3><p>阅读核心代码、查看历史记录，或导入本地 PGM 图像。接上板子后再执行硬件操作。</p><button class="text-button" data-go="source">查看代码入口 →</button></div>
+        <dl class="readings">
+          <div><dt>Camera Link 模式</dt><dd id="cl-mode">Base 模式 (单缆 Port 0)</dd></div>
+          <div><dt>传感器 / 几何</dt><dd id="camera-geo">4096 × 2000 (16K 线扫 / 4K ROI)</dd></div>
+          <div><dt>像素格式与深度</dt><dd id="format">Mono8 (8-bit 灰度)</dd></div>
+          <div><dt>CL1 像素时钟</dt><dd id="clock">—</dd></div>
+          <div><dt>板载 DDR 状态</dt><dd id="ddr">—</dd></div>
+          <div><dt>PCIe 硬件</dt><dd id="pci-hw">0x4c54:0x3000 · C2H0</dd></div>
+          <div><dt>接收程序</dt><dd id="prepared">尚未加载</dd></div>
+          <div><dt>本地存储目录</dt><dd id="local-dir" title="D:\SG3000_Captures">D:\SG3000_Captures</dd></div>
+        </dl>
+        <div class="inline-note">常规参数说明：相机物理为 16K 线扫，当前在单缆 Base 模式下采集 4096×2000 区域；图像已开启 USB 串口自动回传至 D:\SG3000_Captures。</div>
+      </section>
+    </div>
+    <section class="panel stream-panel"><div class="section-title"><h2>连续接收与处理 · v0.2</h2><span class="chip amber" id="stream-badge">等待验证</span></div>
+      <div class="stream-form"><label>运行时长<select id="stream-seconds"><option value="30">30 秒</option><option value="60">60 秒</option><option value="300">5 分钟</option><option value="0">直到主动停止</option></select></label><label>处理后端<select id="stream-processor"><option value="stats">CPU 灰度统计 · 调试用途</option><option value="pl">FPGA 接口 · 待硬件与驱动</option></select></label><button data-action="prepare_stream" disabled>加载连续程序</button><button id="start-stream" class="primary" disabled>开始连续接收</button><button id="replay">离线结果回放</button></div>
+      <div class="stream-metrics"><div><small>已处理图像块</small><strong id="stream-count">—</strong></div><div><small>当前块编号 / 尺寸</small><strong id="stream-block">—</strong></div><div><small>灰度范围 / 均值</small><strong id="stream-gray">—</strong></div><div><small>检测结论</small><strong id="stream-decision">尚无检测算法</strong></div></div>
+      <p class="stream-summary" id="stream-summary">接收与处理并行，队列满时停止并报告。灰度统计不作合格／缺陷判定；本次先向中控台输出。</p>
+      <div class="inline-note">使用前先加载基础驱动，并将 <a href="/api/addon" download="sg3000-stream-v0.2.zip">SD 补充包</a> 解压到 SD 根目录，保留原文件。连续模块尚未上板验证。<button class="text-button" data-file="interfaces">接口与部署说明 →</button></div>
+    </section>
+    <section class="panel terminal-panel"><div class="section-title"><div class="terminal-heading"><h2>操作与串口日志</h2><span id="terminal-status">串口未连接</span></div><div class="terminal-tools"><label><input id="autoscroll" type="checkbox" checked> 跟随日志</label><button id="export">导出本次日志</button><button id="interrupt" class="danger" disabled>中断操作</button></div></div><pre id="terminal" tabindex="0" aria-label="串口原始日志"></pre><div class="terminal-foot">日志保存在本机 runtime 文件夹。中断请求不等于 DMA 已停止；以程序返回与日志为准。</div></section>
+    <section class="panel image-panel"><div class="section-title"><div><h2>图像查看器</h2><p>本地存储于 D:\SG3000_Captures。采集或回传后自动显示，亦可手动导入。</p></div><div style="display:flex;gap:8px;align-items:center;"><button id="view-latest-btn" style="font-size:12px;" disabled>显示最新采集图</button><label class="file-button">导入 PGM<input id="pgm" type="file" accept=".pgm"></label></div></div><div id="image-empty" class="image-empty"><span>▧</span><p>等待完整图像</p><small id="image-empty-sub">采集成功后图像将自动保存到 D:\SG3000_Captures 并在下方显示。</small></div><canvas id="image" hidden></canvas><div id="image-info" class="image-info"></div><div id="board-frame" class="inline-note" hidden></div></section>
+  </section>
+  <section id="source" class="view"><div class="title-row"><div><div class="eyebrow">SOURCE EXPLORER</div><h1>代码有入口，也有路径。</h1><p class="subtitle">核心工程独立存放。先读主程序，再看采集流程，最后深入驱动。</p></div><span class="chip">只读源码浏览</span></div><div class="source-layout"><aside class="panel source-files" id="source-files"></aside><section class="panel code-panel"><div class="code-title"><h2 id="source-title">应用入口</h2><button id="copy-path">复制完整路径</button></div><p id="source-guide" class="code-guide"></p><div class="code-location" id="source-path"></div><div class="code-scroll" id="code-scroll"><pre id="code"></pre></div></section></div></section>
+  <section id="history" class="view"><div class="title-row"><div><div class="eyebrow">EVIDENCE / 2026.10.23</div><h1>做过什么，证据在哪里。</h1><p class="subtitle">以下全部是历史记录，和本次连接状态分开显示。</p></div><span class="chip amber">历史快照</span></div><div class="history-grid"><article class="panel history-card"><span class="history-index">01 / 已验证</span><h2>Linux 与采集卡</h2><p>Linux 5.15.19-xilinx-v2022.1 启动；PCIe 识别 4c54:3000。自制驱动成功加载、卸载并再次加载。</p><button data-file="history">打开上板日志 →</button></article><article class="panel history-card"><span class="history-index">02 / 已保存</span><h2>SD 卡上的恢复入口</h2><p>接收程序、驱动及 resume.sh 写入 sg3000-linux-20261023。校验与重新挂载读回均通过，随后卸载 SD 和驱动。</p><button data-file="saved">打开保存记录 →</button></article><article class="panel history-card pending"><span class="history-index">03 / 待硬件验证</span><h2>真正搬回一帧图像</h2><p>相机维修中。此前 CL1 未锁定，DDR 状态为 2；未获得有效帧头，没有执行真实图像 DMA。DDR=2 的含义仍需核实。</p><button data-file="flow">看看流程停在哪里 →</button></article></div><div class="panel scope"><h2>当前工程边界</h2><p>ZCU102 的 ARM/Linux 控制 SG3000；采集卡负责 Camera Link。尚未新增 ZCU102 PL 采集电路。历史上板基线是端口 0、Base、Mono8、无填充、单帧。v0.2 连续逻辑已通过离线验证，尚未上板。此前的模拟测试验证了软件处理逻辑，不能替代相机与 DMA 的实测。</p></div></section>
+  <section id="guide" class="view"><div class="title-row"><div><div class="eyebrow">OPERATOR'S GUIDE</div><h1>从连接到第一帧。</h1><p class="subtitle">现在可以离线阅读。回到实验室后按步骤操作。</p></div></div><div class="guide-grid"><article class="panel"><h2>01 / 连接</h2><p>板子由 SD 卡启动，J83 接电脑。刷新串口，选择 CP2108 的 Linux 控制台端口；过去为 COM10，但端口号可能变化。</p><p>先关闭其他占用此端口的串口软件，再点连接与唤醒。看到 root 提示符后执行检查板卡。</p></article><article class="panel"><h2>02 / 准备</h2><p>检查板卡通过后，从 SD 卡加载已验证的程序。此步骤只读挂载 SD，拷入板上临时目录并加载驱动，不修改启动文件。</p><p>若出现登录界面或 U-Boot 提示符，暂不发自动命令；先用串口工具完成 Linux 登录。</p></article><article class="panel"><h2>03 / 检查与采集</h2><p>相机供电、接线恢复后，检查采集条件。只有条件满足才尝试单帧采集。失败时保留日志，按阶段定位。</p><p>图像暂存在板子 /tmp，断电会消失。本版支持导入本地 PGM 查看，未实现大图自动回传与视频流。</p></article><article class="panel"><h2>04 / 阅读与维护</h2><p>core 是核心源码，board 是此前验证过的板上文件，console 是中控台。编译结果进入 build/output，不自动覆盖 board。</p><p>当前工程独立于旧调试目录。旧测试与逆向记录保留在原处，日常操作无需翻找它们。</p></article></div><div class="panel scope"><h2>和我一起调试时</h2><p>告诉我具体操作和界面提示，或导出本次日志。每条操作都记录命令与返回内容；需要深入时，可以直接在“核心代码”中找到对应函数。</p><button data-file="guide">打开完整说明 →</button><p id="project-root" class="path-note"></p></div></section>
+  <footer><span>SG3000 WORKBENCH</span><span>控制在板上，过程在眼前。</span><button id="shutdown">关闭本机服务</button></footer>
+</main>
+<div id="toast" role="status" hidden></div>
+<script src="/app.js"></script>
+<script src="/defects.js"></script>
+</body></html>

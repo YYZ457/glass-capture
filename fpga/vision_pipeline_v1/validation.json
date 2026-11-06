@@ -1,0 +1,63 @@
+{
+  "schema": "vision-pipeline-validation-v1",
+  "created_utc": "2026-10-24T17:34:44.440735+00:00",
+  "python_tests_passed": 29,
+  "cpp_random_reference_cases": 155,
+  "cpp_boundary_rejection_repeat_tests_passed": true,
+  "rtl_simulation": {
+    "fifo": "pass",
+    "job_supervisor": "pass",
+    "gray_frame_framer": "pass"
+  },
+  "rtl_ooc_synthesis": "pass_default_parameters",
+  "failure_gate_calibrated": true,
+  "hls": {
+    "generated_register_map_matches": true,
+    "axi_address_bits": 64,
+    "axi_data_bits": 32,
+    "estimated_clock_ns": "7.300",
+    "resources": {
+      "BRAM_18K": "2",
+      "DSP": "129",
+      "FF": "8393",
+      "LUT": "15155",
+      "URAM": "0"
+    },
+    "mode": "cosim",
+    "board_tested": false,
+    "source_sha256": {
+      "quant_engine.cpp": "4fa7cabfc16e326d2253d7b8967ecc6d874cb59dfc22aafd655dcafeb116b52d",
+      "quant_engine.h": "5cb72db42791e8f22d7de9b9130bfbcf57e83a70439ad04e21e0561d278359e1"
+    },
+    "rtl_cosim_passed": true
+  },
+  "rtl_cosim_sequential_jobs": 7,
+  "ip_exported": true,
+  "source_quant_engine_sha256": "4fa7cabfc16e326d2253d7b8967ecc6d874cb59dfc22aafd655dcafeb116b52d",
+  "legacy_original_sha256": "02a2c4c2e101cf786226fac3b718960b82086ce64bc03a543526645f7aea6c5f",
+  "real_image_execution_smoke": {
+    "source": "C:\\Users\\YANYZ\\Desktop\\图\\图\\1.bmp",
+    "crop_xyxy": [
+      11296,
+      928,
+      11808,
+      1440
+    ],
+    "box_candidates_returned": 1024,
+    "box_candidate_limit_reached": true,
+    "legacy_candidates_returned": 46,
+    "ground_truth_accuracy_evaluated": false
+  },
+  "board_tested": false,
+  "camera_dma_frame_verified": false,
+  "dark_field_accuracy_evaluated": false,
+  "place_route_timing_closed": false,
+  "tested_python_distributions": {
+    "numpy": "2.2.6",
+    "opencv-python": "4.12.0.88",
+    "scipy": "1.17.0",
+    "Pillow": "12.0.0"
+  },
+  "build_root": "D:\\CodexData\\visionkit_zcu102\\reusable_core",
+  "delivery_directory": "D:\\CodexData\\visionkit_zcu102\\reusable_core\\delivery\\vision_pipeline_v1"
+}

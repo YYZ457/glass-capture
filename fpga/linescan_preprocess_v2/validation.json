@@ -1,0 +1,157 @@
+{
+  "created_utc": "2026-10-24T17:58:16.892286+00:00",
+  "python_tests": "107 passed",
+  "native_preprocess_accepted_cases": 329,
+  "native_preprocess_rejected_cases": 34,
+  "cpp_cc_random_oracle_frames": 3000,
+  "rtl_cosim_jobs": 9,
+  "rtl_cosim_passed": true,
+  "max_cosim_cycles": 71273,
+  "aarch64_static_test_cross_compiled": true,
+  "aarch64_test_executed": false,
+  "board_tested": false,
+  "routed_timing_verified": false,
+  "darkfield_accuracy_evaluated": false,
+  "hls": {
+    "register_map_verified": true,
+    "axi_address_bits": 64,
+    "axi_data_bits": 32,
+    "estimated_clock_ns": "7.300",
+    "resources": {
+      "BRAM_18K": "18",
+      "DSP": "13",
+      "FF": "6820",
+      "LUT": "10481",
+      "URAM": "0"
+    },
+    "pipelines": {
+      "preprocess_tile_Pipeline_4_csynth": {
+        "unit": "clock cycles",
+        "Best-caseLatency": "17",
+        "Average-caseLatency": "17",
+        "Worst-caseLatency": "17",
+        "Best-caseRealTimeLatency": "0.170 us",
+        "Average-caseRealTimeLatency": "0.170 us",
+        "Worst-caseRealTimeLatency": "0.170 us",
+        "Interval-min": "17",
+        "Interval-max": "17",
+        "loops": {
+          "Loop1": {
+            "ii": "1",
+            "pipeline_depth": "1"
+          }
+        }
+      },
+      "preprocess_tile_Pipeline_5_csynth": {
+        "unit": "clock cycles",
+        "Best-caseLatency": "17",
+        "Average-caseLatency": "17",
+        "Worst-caseLatency": "17",
+        "Best-caseRealTimeLatency": "0.170 us",
+        "Average-caseRealTimeLatency": "0.170 us",
+        "Worst-caseRealTimeLatency": "0.170 us",
+        "Interval-min": "17",
+        "Interval-max": "17",
+        "loops": {
+          "Loop1": {
+            "ii": "1",
+            "pipeline_depth": "1"
+          }
+        }
+      },
+      "preprocess_tile_Pipeline_cache_corrected_row_csynth": {
+        "unit": "clock cycles",
+        "Best-caseLatency": "6",
+        "Average-caseLatency": "140",
+        "Worst-caseLatency": "275",
+        "Best-caseRealTimeLatency": "60.000 ns",
+        "Average-caseRealTimeLatency": "1.400 us",
+        "Worst-caseRealTimeLatency": "2.750 us",
+        "Interval-min": "6",
+        "Interval-max": "275",
+        "loops": {
+          "cache_corrected_row": {
+            "ii": "1",
+            "pipeline_depth": "5"
+          }
+        }
+      },
+      "preprocess_tile_Pipeline_emit_row_csynth": {
+        "unit": "clock cycles",
+        "Best-caseLatency": "40",
+        "Average-caseLatency": "174",
+        "Worst-caseLatency": "309",
+        "Best-caseRealTimeLatency": "0.400 us",
+        "Average-caseRealTimeLatency": "1.740 us",
+        "Worst-caseRealTimeLatency": "3.090 us",
+        "Interval-min": "40",
+        "Interval-max": "309",
+        "loops": {
+          "emit_row": {
+            "ii": "1",
+            "pipeline_depth": "39"
+          }
+        }
+      },
+      "preprocess_tile_Pipeline_fetch_packed_row_csynth": {
+        "unit": "clock cycles",
+        "Best-caseLatency": "4",
+        "Average-caseLatency": "38",
+        "Worst-caseLatency": "72",
+        "Best-caseRealTimeLatency": "40.000 ns",
+        "Average-caseRealTimeLatency": "0.380 us",
+        "Worst-caseRealTimeLatency": "0.720 us",
+        "Interval-min": "4",
+        "Interval-max": "72",
+        "loops": {
+          "fetch_packed_row": {
+            "ii": "1",
+            "pipeline_depth": "3"
+          }
+        }
+      },
+      "preprocess_tile_Pipeline_load_calibration_csynth": {
+        "unit": "clock cycles",
+        "Best-caseLatency": "10",
+        "Average-caseLatency": "144",
+        "Worst-caseLatency": "279",
+        "Best-caseRealTimeLatency": "0.100 us",
+        "Average-caseRealTimeLatency": "1.440 us",
+        "Worst-caseRealTimeLatency": "2.790 us",
+        "Interval-min": "10",
+        "Interval-max": "279",
+        "loops": {
+          "load_calibration": {
+            "ii": "1",
+            "pipeline_depth": "3"
+          }
+        }
+      },
+      "preprocess_tile_Pipeline_store_core_row_csynth": {
+        "unit": "clock cycles",
+        "Best-caseLatency": "4",
+        "Average-caseLatency": "131",
+        "Worst-caseLatency": "259",
+        "Best-caseRealTimeLatency": "40.000 ns",
+        "Average-caseRealTimeLatency": "1.310 us",
+        "Worst-caseRealTimeLatency": "2.590 us",
+        "Interval-min": "4",
+        "Interval-max": "259",
+        "loops": {
+          "store_core_row": {
+            "ii": "1",
+            "pipeline_depth": "3"
+          }
+        }
+      }
+    },
+    "mode": "cosim",
+    "board_tested": false,
+    "source_sha256": {
+      "preprocess_tile.cpp": "f922bad02e1a00ba6a4afd1dafd32dc2e1b7cf0d4371bc00120c93fac060cacd",
+      "preprocess_tile.h": "02f40b54d37c3d89d7e1e8679e6691478b7f3a345bb0b6d76dfa6007967b86b1"
+    },
+    "rtl_cosim_passed": true
+  },
+  "ip_sha256": "998de4298b11fb7a18ab65bf56d4b85e1ca695e2ce1d59450e163b25c5db8f00"
+}

@@ -1,0 +1,124 @@
+# 架构
+
+状态：✅ 实机日志证明 ｜ 🟡 写了但没上板跑过 ｜ ⬜ 空，待写 ｜ ❓ 缺外部信息（厂家资料）
+
+## 1. 全链路
+
+```
+相机 SF6200-CL16K（出厂默认配置）
+  │ Camera Link Base ················ I1
+SG3000 卡（块先存在卡上 DDR）
+  │ PCIe / XDMA，每次 64 KiB，轮询 ·· I2 寄存器、I3 块头
+ZCU102 · ARM · Linux 5.15（PL 不在通路里，D001）
+  driver/ ──ioctl── I4
+  capture/ ── I5 ── stream/ ── processing/ ── transport/
+  │ 现在：USB 串口 115200；计划：千兆网 ·· I6
+电脑 host/
+```
+
+满速约 252 MB/s，原图出不了板子，最终要板上检测（D002）。
+
+## 2. 依赖方向
+
+只能从上往下调用：
+
+```
+apps ─▶ stream ─▶ processing
+  │        │
+  │        └────▶ capture ─▶ (sg_capture_io 回调表) ─▶ capture/sg_io_linux.c ─ioctl─▶ driver
+  └─▶ transport、camera_ctrl ─▶ capture/sg_session
+```
+
+`host/` 不认识任何寄存器，只认 I6 和 `docs/interfaces/schemas/`。
+
+## 3. 文件清单
+
+### include/ — 跨模块共享
+
+| 文件 | 职责 | 状态 |
+|---|---|---|
+| `sg3000_regs.h` | **所有**寄存器地址和魔数，每条标可信度 | ✅ 已从源码抽出 |
+| `sg3000_rx_uapi.h` | 驱动 ⇄ 用户态的 4 个 ioctl | ✅ 原样 |
+| `sg_capture_io.h` | 协议层向下的回调表 | ✅ 原样 |
+| `sg_frame.h` | 采集块结构体 | ✅ 原样 |
+| `sg_err.h` | 每个错误码在本项目里的含义 | ✅ |
+| `sg_pl_uapi.h` | PL 驱动 ABI（提议，无实现）| 🟡 |
+
+### board/driver/ — 只搬字节，不认识相机
+
+| 文件 | 职责 | 状态 |
+|---|---|---|
+| `sg3000_rx.c` | PCIe 绑定、BAR 映射、寄存器白名单、DMA、出错隔离 | ✅ 原样迁入（315 行，不拆）|
+| `Kbuild`、`module.sh`、`verify_module.py` | 构建 .ko 并检查目标内核 ABI | ✅ 仅改路径 |
+
+### board/capture/ — 和卡的固件对话（原 `sg3000_capture_core.c` 拆成 5 份）
+
+| 文件 | 职责 | 状态 |
+|---|---|---|
+| `sg_session` | 会话、超时参数、读写小工具、帧释放 | ⬜ 待迁移 |
+| `sg_mailbox` | 邮箱报文收发 | ⬜ 待迁移 |
+| `sg_preflight` | 只读体检 | ⬜ 待迁移 |
+| `sg_block` | 块头读取、校验（纯函数）、分块 DMA | ⬜ 待迁移 |
+| `sg_acq` | 开始 / 取块 / 停止状态机，单帧便捷函数 | ⬜ 待迁移 |
+| `sg_io_linux` | 回调表的 ioctl 实现（原来两个程序各抄一份，现合并）| ⬜ 待迁移 |
+
+### board/processing/ — 一块像素进，一个结果出
+
+| 文件 | 职责 | 状态 |
+|---|---|---|
+| `sg_processing.h` | 处理器接口 | ✅ 原样 |
+| `sg_view.c` | 输入合法性检查 | ⬜ 待迁移 |
+| `sg_stats.c` | CPU 诊断统计（不是缺陷判定）| ⬜ 待迁移 |
+| `sg_pl_backend.c` | PL 处理器 | 🟡 暂不迁移（D001）|
+| `sg_candidates` | 颗粒候选检测 | ⬜ 全新 |
+
+### board/stream/
+
+| 文件 | 职责 | 状态 |
+|---|---|---|
+| `sg_pipeline` | 采集线程 → 有界队列 → 处理线程 | ⬜ 待迁移（legacy 🟡）|
+| `sg_linecheck` | 块号连续性、累计行数、实际行频 | ⬜ 全新，纯计算 |
+
+### board/camera_ctrl/ — ⬜❓ 全部依赖厂家资料（I7）
+
+`cam_serial`（串口通道）、`cam_config`（宽度、行频、曝光、触发、测试图案、User Set）
+
+### board/transport/
+
+| 文件 | 职责 | 状态 |
+|---|---|---|
+| `tx_jsonl` | 结果写成 `SGJSON` 行到 stdout（经串口给中控台）| ⬜ 待迁移 |
+| `tx_tcp` | 经网口发原图块 / 候选（I6）| ⬜ 全新 |
+
+### board/apps/ — 只做参数解析和组装
+
+| 文件 | 程序 | 状态 |
+|---|---|---|
+| `sg_status.c` | `sg_status` 只读体检 | ⬜ 全新，建议第一个写 |
+| `sg_capture_main.c` | `sg3000-capture` 单帧 | ⬜ 待迁移 |
+| `sg_stream_main.c` | `sg3000-stream` 连续 | ⬜ 待迁移 |
+| `pgm_write` | 原子写 PGM | ⬜ 待迁移 |
+
+### 其他
+
+| 目录 | 内容 | 状态 |
+|---|---|---|
+| `host/console/`、`host/tests/` | 中控台（Python 网页服务 + 串口通道 + 离线检测）及测试 | ✅ 原样 |
+| `host/receiver/rx_tcp.py` | I6 接收端 | ⬜ |
+| `fpga/` | 三个 HLS/RTL 包，原样保留，不细分（D001）| 🟡 |
+| `verify/V1-V4` | 测试图案、行完整性、暗场、真值比对 | ⬜ |
+| `platform/` | 启动文件 | ⚠️ 只在 SD 卡上 |
+| `legacy/` | 原始代码，只读，迁移参照 | ✅ 仍可编译 |
+
+## 4. 填写顺序
+
+1. `sg_session` → `sg_mailbox` → `sg_preflight` → `sg_io_linux` → `apps/sg_status`：第一个能上板跑的新程序，只读零风险
+2. `sg_block` → `sg_acq` → `pgm_write` → `apps/sg_capture_main`：和 legacy 采同一帧，逐字节对比
+3. 去掉二进制补丁（D003）
+4. `verify/V2`、`V3`：现在就能做，不需要镜头
+5. Windows + VisionKit 一趟：填 I1、I2 待办、I7，跑 V1
+6. `tx_tcp` + `rx_tcp`：告别串口
+7. `sg_linecheck`、`sg_pipeline`、`apps/sg_stream_main`：连续采集上板
+8. 检测：host 上跑通 + V4，再写 `sg_candidates`
+
+每一步：迁移 → `make -C board check` → 上板对比 legacy → 更新本文件状态列。

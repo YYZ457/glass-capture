@@ -1,0 +1,32 @@
+{
+  "schema": "linescan-preprocess-v2.0",
+  "top": "preprocess_tile",
+  "target_part": "xczu9eg-ffvb1156-2-e",
+  "control": "ap_ctrl_hs single shot; auto_restart prohibited",
+  "axi_address_bits": 64,
+  "axi_data_bits": 32,
+  "input_format": "Mono8 packed little endian, 4 pixels per uint32",
+  "offset_unit": "uint32 words",
+  "stride_unit": "bytes, multiple of 4 and >= image_width",
+  "limits": {"image_width": [1,16384], "image_height": [1,65536], "core_width": [1,256], "core_height": [1,64], "radius": [0,7], "threshold": [1,255], "memory_words": [1,536870912]},
+  "register_offsets_bytes": {
+    "control": 0, "memory_low": 16, "memory_high": 20,
+    "memory_words": 28, "input_offset": 36, "stride_bytes": 44,
+    "image_width": 52, "image_height": 60, "core_x": 68, "core_y": 76,
+    "core_width": 84, "core_height": 92, "radius": 100,
+    "calibration_offset": 108, "output_offset": 116, "polarity": 124,
+    "threshold": 132, "flags": 140, "return_status": 148
+  },
+  "polarity": {"both":0,"bright":1,"dark":2},
+  "flags": {"column_calibration":1,"other_bits":"must be zero"},
+  "calibration": {"entry":"one uint32 per global image column","dark_bits":[0,7],"gain_bits":[8,31],"gain_format":"unsigned Q8.16; zero means invalid","formula":"min(255,(max(raw-dark,0)*gain+32768)>>16)"},
+  "background": {"kernel":"square box, diameter=2*radius+1","border":"replicate only true image edges","rounding":"(full_2D_sum + floor(area/2)) / area using integer division","validity":"all neighborhood samples valid"},
+  "output_bits": {"corrected":[0,7],"background":[8,15],"signed_difference_twos_complement":[16,24],"valid":25,"threshold_pass":26,"reserved_zero":[27,31]},
+  "output_layout":"core_height rows of core_width uint32, no halo",
+  "invalid_neighborhood":"signed_difference=0 and threshold_pass=0",
+  "status": {"ok":0,"bad_memory":1,"bad_dimension":2,"bad_parameter":3,"bad_range":4,"overlap":5},
+  "error_atomicity":"validate full source including row padding, enabled calibration and output before any writes; invalid request leaves memory unchanged",
+  "host_cache": {"default_core_rows":64,"maximum_retained_input_payload_bytes_at_16k_r7":1277952,"bound":"width*(core_rows+2*radius)","excluded":"snapshots, arenas, output, objects and temporary copies"},
+  "components": {"execution":"CPU","connectivity":8,"merge":"same polarity only","bbox":"half open global coordinates","retained_records_bound":"2*width","output_count_cap":null},
+  "board_tested":false
+}

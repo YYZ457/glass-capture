@@ -1,0 +1,39 @@
+{
+  "schema": "vision-pipeline-contract-v1",
+  "version": "1.0.0",
+  "target": {"board": "ZCU102", "part": "xczu9eg-ffvb1156-2-e", "tool": "Vitis HLS/Vivado 2022.1", "target_period_ns": 10},
+  "frame": {"format": "Mono8", "shape_order": "HW", "coordinates": "xyxy_half_open", "candidate_scores": "response_DN_not_probability"},
+  "quantization": {
+    "tensor_layout": "CHW", "dense_weights": "OIHW", "depthwise_weights": "C1HW",
+    "input": "signed_int8_symmetric_zero_point_0", "weight": "signed_int8_symmetric_zero_point_0",
+    "element_storage_bits": 32, "int8_storage": "low_8_bits_twos_complement_high_bits_ignored",
+    "offset_unit": "32_bit_word", "accumulator": "int64_then_saturate_int32_once",
+    "requant": "saturate_int8(round_ties_away(input*multiplier/2^shift))_then_optional_relu",
+    "multiplier_range": [0,2147483647], "shift_range": [0,31]
+  },
+  "limits": {"memory_words_max": 16777216, "channels_max": 64, "height_max": 128, "width_max": 128, "rtl_framer_dimension_max": 65536},
+  "opcodes": {
+    "1": {"name":"conv", "kernel":[1,3], "stride":[1,2], "pad":[0,1], "flags":{"1":"depthwise_multiplier_1","4":"bias"}, "output":"int32"},
+    "2": {"name":"maxpool", "kernel":2, "stride":2, "odd_border":"drop", "output":"int8"},
+    "3": {"name":"requant", "flags":{"2":"relu"}, "output":"int8"},
+    "4": {"name":"add_sat", "input":"int32", "output":"int32"}
+  },
+  "operator_status": {"0":"ok","1":"opcode","2":"memory","3":"dimension","4":"parameter","5":"range","6":"overlap","7":"scale"},
+  "control": {
+    "protocol":"ap_ctrl_hs", "auto_restart":false, "ap_done_clear_on_read":true,
+    "register_byte_offsets": {
+      "control":0,"memory_low":16,"memory_high":20,"memory_words":28,"opcode":36,
+      "input_offset":44,"input2_offset":52,"output_offset":60,"weights_offset":68,
+      "bias_offset":76,"multiplier_offset":84,"shift_offset":92,"channels_in":100,
+      "height":108,"width":116,"channels_out":124,"kernel":132,"stride":140,
+      "pad":148,"flags":156,"return_status":164
+    },
+    "axi_address_bits":64, "axi_data_bits":32,
+    "recovery":"retain_allocation_until_reset_and_bus_drain_confirmed",
+    "linux_backend_implemented":false
+  },
+  "rtl": {"clock_domains":1,"reset":"synchronous_active_high","cdc":false,"fifo_depth_min":2,"ready_valid_stability_required":true},
+  "unsupported": ["automatic_model_conversion","asymmetric_quantization","arbitrary_grouped_conv","automatic_channel_partition_accumulation","silu","softmax","nms","complete_trained_detector"],
+  "traditional_implementation":"numpy_cpu_reference_plus_optional_preserved_dog",
+  "hardware_claims": {"board_tested":false,"routed_timing_closed":false,"camera_frame_received":false,"realtime_throughput_validated":false,"dark_field_accuracy_validated":false}
+}

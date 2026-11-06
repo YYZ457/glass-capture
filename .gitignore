@@ -1,0 +1,23 @@
+# 构建产物
+board/out/
+board/driver/output/
+*.o
+*.ko
+*.mod*
+*.cmd
+Module.symvers
+modules.order
+
+# 运行产物（图像、日志不进 git）
+runtime/
+*.pgm
+*.raw
+
+# Python
+__pycache__/
+.pytest_cache/
+*.pyc
+
+# 启动镜像只记录 SHA256，原件另外备份
+platform/sdcard-boot/BOOT.BIN
+platform/sdcard-boot/image.ub
