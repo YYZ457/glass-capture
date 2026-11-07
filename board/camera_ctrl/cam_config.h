@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: MIT
  *
  * cam_config.h —— 相机的高层配置：用"意思"而不是"命令字符串"来设置相机。⬜❓
- * 依赖：cam_serial（发命令）。命令表来自 docs/interfaces/I7_camera_serial.md。
+ * 依赖：cam_serial（发命令）、cam_regs.h（寄存器地址，[参考8K]）。协议见 docs/interfaces/I7。
+ * 实现思路：每个字段 = 读写 cam_regs.h 里的一个寄存器（大端 32 位），曝光和行频按 80 MHz 时钟数换算。
  *
  * 目标值（来自项目要求）：宽 16384、行频约 15.4 kHz（75 mm/s ÷ 4.88 µm）、Mono8
  */

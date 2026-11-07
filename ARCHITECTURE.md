@@ -79,9 +79,13 @@ apps ─▶ stream ─▶ processing
 | `sg_pipeline` | 采集线程 → 有界队列 → 处理线程 | ⬜ 待迁移（legacy 🟡）|
 | `sg_linecheck` | 块号连续性、累计行数、实际行频 | ⬜ 全新，纯计算 |
 
-### board/camera_ctrl/ — ⬜❓ 全部依赖厂家资料（I7）
+### board/camera_ctrl/ — 相机控制（I7）
 
-`cam_serial`（串口通道）、`cam_config`（宽度、行频、曝光、触发、测试图案、User Set）
+| 文件 | 职责 | 状态 |
+|---|---|---|
+| `cam_regs.h` | 相机寄存器地址 | 🟡 来自同系列 8K 型号 XML，待 16K 确认 |
+| `cam_serial` | GenCP 读写一个寄存器 | ⬜❓ 缺 Linux 下经卡收发串口的方法 |
+| `cam_config` | 宽度、行频、曝光、触发、测试图案、User Set | ⬜ |
 
 ### board/transport/
 
@@ -109,6 +113,7 @@ apps ─▶ stream ─▶ processing
 | `verify/V1-V4` | 测试图案、行完整性、暗场、真值比对 | ⬜ |
 | `platform/` | 启动文件 | ⚠️ 只在 SD 卡上 |
 | `legacy/` | 原始代码，只读，迁移参照 | ✅ 仍可编译 |
+| `docs/vendor/` | 厂家 SDK 头文件、示例源码、同系列相机 XML、外部报告（带核对表）| ✅ 2026-11-07 收入 |
 
 ## 4. 填写顺序
 

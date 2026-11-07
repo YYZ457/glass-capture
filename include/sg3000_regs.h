@@ -6,6 +6,7 @@
  *   [厂家]  来自厂家文档                      —— 目前没有任何一条
  *   [观察]  来自观察 Windows 驱动 / VisionKit 的行为，并在 ZCU102 上实测通过
  *   [推测]  能用，但含义是推断出来的
+ *   [推测+] 推测，且有旁证（如与厂家示例里的参数名对得上）
  *   [未知]  只知道要读/写它，不知道它是什么
  *
  * 地址分三类：
@@ -72,12 +73,16 @@
 /* ===== C. 逻辑地址（只能经邮箱访问）================================= */
 #define SG_L_DDR_STATUS          0x10540024u  /* [推测] 0 未初始化 / 2 已校准；实测 2 */
 #define SG_L_PIXEL_CLOCKS        0x10002020u  /* [推测] bit0 = Camera Link 时钟 1 有信号；实测 0x59，其余位未知 */
-#define SG_L_CL_CONFIG           0x10601004u  /* [推测] 0 = Base；实测 0 */
-#define SG_L_CAMERA_COLOR        0x10601008u  /* [推测] 0 = 黑白；实测 0 */
-#define SG_L_CAMERA_DEPTH        0x1060100cu  /* [推测] 位深；实测 8 */
+/* 下面三条与 VisionKit 示例里的卡参数 ClConfiguration / CameraColorType / CameraPixelDepth
+ * 顺序和含义一致（docs/interfaces/I2 第 5 节），可信度略升，仍待卡的 XML 确认 */
+#define SG_L_CL_CONFIG           0x10601004u  /* [推测+] ClConfiguration，0 = Base；实测 0 */
+#define SG_L_CAMERA_COLOR        0x10601008u  /* [推测+] CameraColorType，0 = 黑白；实测 0 */
+#define SG_L_CAMERA_DEPTH        0x1060100cu  /* [推测+] CameraPixelDepth；实测 8 */
 #define SG_L_ACQ_START           0x10601014u  /* [观察] 写 = 开始采集 */
 #define SG_L_ACQ_STOP            0x10601018u  /* [观察] 写 = 停止采集 */
-/* 待找：帧宽 / 每块行数 / tap 数的配置地址（目前卡固定 4096 宽，原因未知）*/
+/* 待找：卡参数 CameraWidth / CameraHeight / DeviceTapGeometry 的地址。
+ * 已确认 Windows 软件每次都设置 CameraWidth，Linux 从未设置 → 卡报告 4096 的直接原因。
+ * 地址要从卡的 XML 拿，**不要试写**。 */
 
 /* ===== B. BAR1：XDMA（只在 board/driver/ 里用）====================== */
 #define SG_XDMA_C2H              0x1000u      /* [观察] C2H 通道 0 */

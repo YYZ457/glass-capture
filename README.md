@@ -2,7 +2,9 @@
 
 透明玻璃表面微颗粒线扫检测 · 采集与处理代码。
 
-相机 SF6200-CL16K → SG3000 采集卡 → ZCU102（ARM Linux）→ 电脑。
+相机 JAI SW-WS2-CL16K-50M-SDE（凌云光型号 SF6200-CL16K-50M）→ 凌云光 SG3000 采集卡 → ZCU102（ARM Linux）→ 电脑。
+
+厂家资料与核对结论：`docs/vendor/README.md`。
 
 ## 这个仓库是什么状态
 

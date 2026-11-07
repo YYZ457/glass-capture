@@ -58,8 +58,23 @@
 | 0x10601018 | 停止采集（写）| 观察 | — |
 | ？ | 帧宽 / 每块行数 / tap 数 | **待找** | 卡报告 4096 × 2000 |
 
-## 5. 待办
+## 5. 卡的 GenICam 参数名（2026-11-07，来自 VisionKit 示例源码）
 
-- [ ] 向厂家要寄存器文档，逐条核对
-- [ ] Windows + VisionKit：抓它启动时实际写了哪些逻辑地址（尤其是帧宽）
-- [ ] 弄清 0x59 其余各位
+Windows 软件连接后会设置的卡参数见 `docs/vendor/README.md`。其中三个和我们预检读的逻辑地址**顺序、含义都对得上**：
+
+| 示例源码里的参数 | 我们读的逻辑地址 | 实测 | 推测 |
+|---|---|---|---|
+| `ClConfiguration` | 0x10601004 | 0 | 同一个参数 |
+| `CameraColorType` | 0x10601008 | 0 | 同一个参数 |
+| `CameraPixelDepth` | 0x1060100c | 8 | 同一个参数 |
+| `CameraScanType`、`DeviceTapGeometry`、**`CameraWidth`**、**`CameraHeight`** | 未知 | — | 可能在 0x106010xx 附近，**不要去试写** |
+
+另外：卡的 XML 据称存在卡的 Flash 里（URL `Local:SGCard.xml`），未核实。拿到它，上表就能全部确认。
+
+## 6. 待办
+
+- [ ] 拿到卡的 XML，找到 `CameraWidth` / `CameraHeight` / `DeviceTapGeometry` 的地址
+- [ ] Windows：`VkConfigSave(sg3000, ...)` 存一份卡的当前参数
+- [ ] 卡的 XML 核对第 4 节所有推测地址
+- [ ] 弄清 0x10002020 时钟寄存器：日志显示早期 0x19 且位深 0（失败），后来 0x59 且位深 8（成功），bit6 可能和相机就绪有关
+- [ ] 写宽度之前，邮箱写白名单（只允许 START/STOP）和驱动白名单都要按 XML 加**一个**确定地址，不整体放开
