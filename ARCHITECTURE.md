@@ -55,12 +55,12 @@ apps ─▶ stream ─▶ processing
 
 | 文件 | 职责 | 状态 |
 |---|---|---|
-| `sg_session` | 会话、超时参数、读写小工具、帧释放 | ⬜ 待迁移 |
-| `sg_mailbox` | 邮箱报文收发 | ⬜ 待迁移 |
-| `sg_preflight` | 只读体检 | ⬜ 待迁移 |
-| `sg_block` | 块头读取、校验（纯函数）、分块 DMA | ⬜ 待迁移 |
-| `sg_acq` | 开始 / 取块 / 停止状态机，单帧便捷函数 | ⬜ 待迁移 |
-| `sg_io_linux` | 回调表的 ioctl 实现（原来两个程序各抄一份，现合并）| ⬜ 待迁移 |
+| `sg_session` | 会话、超时参数、读写小工具、帧释放 | 🟡 已写，电脑上假卡测试通过，未上板 |
+| `sg_mailbox` | 邮箱报文收发 | 🟡 已写，电脑上假卡测试通过，未上板 |
+| `sg_preflight` | 只读体检 | 🟡 已写，电脑上假卡测试通过，未上板 |
+| `sg_block` | 块头读取、校验（纯函数）、分块 DMA | 🟡 已写，电脑上假卡测试通过，未上板 |
+| `sg_acq` | 开始 / 取块 / 停止状态机，单帧便捷函数 | 🟡 已写，电脑上假卡测试通过，未上板 |
+| `sg_io_linux` | 回调表的 ioctl 实现（原来两个程序各抄一份，现合并）| 🟡 已写，只能上板验证 |
 
 ### board/processing/ — 一块像素进，一个结果出
 
@@ -98,10 +98,10 @@ apps ─▶ stream ─▶ processing
 
 | 文件 | 程序 | 状态 |
 |---|---|---|
-| `sg_status.c` | `sg_status` 只读体检 | ⬜ 全新，建议第一个写 |
-| `sg_capture_main.c` | `sg3000-capture` 单帧 | ⬜ 待迁移 |
+| `sg_status.c` | `sg_status` 只读体检 | 🟡 已写，只能上板验证 |
+| `sg_capture_main.c` | `sg3000-capture` 单帧 | 🟡 已写，上板后与 legacy 逐字节对比 |
 | `sg_stream_main.c` | `sg3000-stream` 连续 | ⬜ 待迁移 |
-| `pgm_write` | 原子写 PGM | ⬜ 待迁移 |
+| `pgm_write` | 原子写 PGM | 🟡 已写，电脑上测试通过 |
 
 ### 其他
 
