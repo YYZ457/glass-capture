@@ -5,6 +5,7 @@
   类型 2 候选   → OUT/candidates/<序号>_<block_id>.json
   类型 3 状态   → 追加到 OUT/status.jsonl
 不做任何检测。一次只接一个板子连接；连接断了就等下一个。
+中控台里用的是同一份代码（Receiver 类，后台线程）。
 任何校验失败（魔数、版本、类型、长度、CRC）都断开这条连接，不尝试"跳过坏消息"。
 
 对端：board/transport/tx_tcp.c
@@ -16,6 +17,7 @@ import os
 import socket
 import struct
 import sys
+import threading
 import zlib
 from pathlib import Path
 
@@ -72,17 +74,20 @@ def decode_frame(payload):
 
 
 def decode_candidates(payload):
-    if len(payload) < 4:
+    """返回 (候选列表, 是否截断)。负载：u32 count、u32 flags（bit0 截断）、count × 32 字节。"""
+    if len(payload) < 8:
         raise ProtocolError("candidate payload too short")
-    (count,) = struct.unpack_from("<I", payload)
-    if len(payload) != 4 + count * CANDIDATE.size:
+    count, flags = struct.unpack_from("<II", payload)
+    if flags & ~1:
+        raise ProtocolError(f"unknown candidate flags 0x{flags:x}")
+    if len(payload) != 8 + count * CANDIDATE.size:
         raise ProtocolError("candidate count does not match payload length")
     items = []
     for i in range(count):
-        x0, y0, x1, y1, area, peak, cx, cy = CANDIDATE.unpack_from(payload, 4 + i * CANDIDATE.size)
+        x0, y0, x1, y1, area, peak, cx, cy = CANDIDATE.unpack_from(payload, 8 + i * CANDIDATE.size)
         items.append({"bbox": [x0, y0, x1, y1], "area": area, "peak": peak,
                       "cx": round(cx, 3), "cy": round(cy, 3)})
-    return items
+    return items, bool(flags & 1)
 
 
 def write_new(path, data):
@@ -98,32 +103,49 @@ def write_new(path, data):
         tmp.unlink()
 
 
-def store(out, kind, seq, block_id, payload):
-    name = f"{seq:010d}_{block_id}"
+class Layout:
+    """落盘位置。命令行默认 OUT/frames、OUT/candidates、OUT/status.jsonl；
+    中控台把原图直接放进采集目录（和串口回传的图放在一起）。"""
+
+    def __init__(self, frames, candidates, status):
+        self.frames, self.candidates, self.status = Path(frames), Path(candidates), Path(status)
+        self.frames.mkdir(parents=True, exist_ok=True)
+        self.candidates.mkdir(parents=True, exist_ok=True)
+
+    @classmethod
+    def under(cls, out):
+        out = Path(out)
+        return cls(out / "frames", out / "candidates", out / "status.jsonl")
+
+
+def store(layout, kind, seq, block_id, payload, prefix=""):
+    """校验并落盘一条消息，返回 (说明文字, 落盘路径或 None)。"""
+    name = f"{prefix}{seq:010d}_{block_id}"
     if kind == TYPE_FRAME:
         width, height, pixels = decode_frame(payload)
-        path = out / "frames" / f"{name}.pgm"
+        path = layout.frames / f"{name}.pgm"
         write_new(path, f"P5\n{width} {height}\n255\n".encode("ascii") + pixels)
-        return f"frame {width}x{height} -> {path}"
+        return f"frame {width}x{height} -> {path}", path
     if kind == TYPE_CANDIDATES:
-        items = decode_candidates(payload)
+        items, truncated = decode_candidates(payload)
         doc = {"schema_version": "board-candidates-v0", "sequence": seq, "block_id": block_id,
                "bbox_convention": "half-open", "connectivity": 8, "decision": "unknown",
-               "count": len(items), "candidates": items}
-        path = out / "candidates" / f"{name}.json"
+               "truncated": truncated, "count": len(items), "candidates": items}
+        path = layout.candidates / f"{name}.json"
         write_new(path, json.dumps(doc, ensure_ascii=False, indent=1).encode("utf-8"))
-        return f"{len(items)} candidates -> {path}"
+        return f"{len(items)} candidates{' (TRUNCATED)' if truncated else ''} -> {path}", path
     text = payload.decode("utf-8")
-    json.loads(text)                     # 必须是合法 JSON
     if "\n" in text:
         raise ProtocolError("status must be a single line")
-    with open(out / "status.jsonl", "a", encoding="utf-8") as f:
-        f.write(json.dumps({"sequence": seq, "block_id": block_id, "status": json.loads(text)},
+    status = json.loads(text)                     # 必须是合法 JSON
+    with open(layout.status, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"sequence": seq, "block_id": block_id, "status": status},
                            ensure_ascii=False) + "\n")
-    return "status"
+    return "status", None
 
 
-def serve_connection(conn, out, log):
+def serve_connection(conn, layout, on_message, prefix=""):
+    """处理一个连接直到对方正常关闭。on_message(kind, seq, block_id, 说明, 路径)。"""
     last_seq = 0
     while True:
         raw = recv_exact(conn, HEADER_SIZE)
@@ -138,7 +160,53 @@ def serve_connection(conn, out, log):
         if zlib.crc32(payload) != crc:
             raise ProtocolError(f"CRC mismatch on message {seq}")
         last_seq = seq
-        print(f"#{seq} block {block_id}: {store(out, kind, seq, block_id, payload)}", file=log)
+        text, path = store(layout, kind, seq, block_id, payload, prefix)
+        on_message(kind, seq, block_id, text, path)
+
+
+class Receiver:
+    """后台线程版，给中控台用：start() 开始监听，stop() 停止。一次服务一个连接。"""
+
+    def __init__(self, layout, on_message, on_event=lambda text: None):
+        self.layout, self.on_message, self.on_event = layout, on_message, on_event
+        self.server = None
+        self.thread = None
+        self.connections = 0
+
+    def start(self, host="0.0.0.0", port=8770):
+        if self.server is not None:
+            return
+        self.server = socket.create_server((host, port))
+        self.server.settimeout(0.5)
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        server, self.server = self.server, None
+        if server is not None:
+            server.close()
+        if self.thread is not None:
+            self.thread.join(timeout=2)
+
+    @property
+    def running(self):
+        return self.server is not None
+
+    def _loop(self):
+        while self.server is not None:
+            try:
+                conn, peer = self.server.accept()
+            except (socket.timeout, OSError):
+                continue
+            self.connections += 1
+            prefix = f"net{self.connections:04d}-"
+            with conn:
+                conn.settimeout(30)
+                try:
+                    serve_connection(conn, self.layout, self.on_message, prefix)
+                    self.on_event(f"网口连接 {peer[0]} 正常结束。")
+                except (ProtocolError, UnicodeDecodeError, ValueError, OSError) as e:
+                    self.on_event(f"网口连接 {peer[0]} 出错断开：{e}")
 
 
 def main(argv=None):
@@ -149,8 +217,10 @@ def main(argv=None):
     parser.add_argument("--once", action="store_true", help="处理完一个连接就退出（测试用）")
     args = parser.parse_args(argv)
 
-    for sub in ("frames", "candidates"):
-        (args.out / sub).mkdir(parents=True, exist_ok=True)
+    layout = Layout.under(args.out)
+
+    def show(kind, seq, block_id, text, path):
+        print(f"#{seq} block {block_id}: {text}", flush=True)
 
     with socket.create_server((args.host, args.port), reuse_port=False) as server:
         print(f"rx_tcp listening on {args.host}:{args.port}, writing to {args.out}", file=sys.stderr)
@@ -160,7 +230,7 @@ def main(argv=None):
             error = None
             with conn:
                 try:
-                    serve_connection(conn, args.out, sys.stdout)
+                    serve_connection(conn, layout, show)
                 except (ProtocolError, UnicodeDecodeError, ValueError, OSError) as e:
                     error = e
             print(f"disconnected: {error or 'clean close'}", file=sys.stderr)

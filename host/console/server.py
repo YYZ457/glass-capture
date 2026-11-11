@@ -14,41 +14,42 @@ from urllib.parse import parse_qs, urlparse
 from transport import Console
 from defects import DefectService
 from offline_frames import FrameService, MAX_UPLOAD
+from transport import CAPTURES
 
 ROOT = Path(__file__).resolve().parents[1]
 WEB = ROOT / 'console' / 'web'
 TOKEN = secrets.token_urlsafe(32)
+REPO = ROOT.parent
+# 「核心代码」页面能打开的文件（路径相对仓库根目录）
 FILES = {
-    'firstframe': ('docs/第一帧到结果.md', 1, '第一帧到结果', '相机到位后的验证顺序、图像复制与离线检测入口。'),
-    'frames': ('docs/真实图像离线接入.md', 1, '第一帧图像与检测接入', '上传 Mono8 PGM，执行原生检测，保留输入摘要、坐标和结果来源。'),
-    'frameschema': ('interfaces/frame-candidates-v1.schema.json', 1, '实际图像候选合同', '真实文件离线计算，不代表板上 DMA 或 PL 已通过。'),
-    'integration': ('docs/离线检测接口.md', 1, '离线检测与后续接入', 'v0.3 离线任务、候选结果合同与实机接入边界。'),
-    'defects': ('console/defects.py', 1, '检测任务与结果适配', '真实调用同包原生模块，验证完成产物，分页显示候选。'),
-    'defectschema': ('interfaces/defects-v1.schema.json', 1, '缺陷候选结果格式', '候选不是质量判定；坐标为全局半开区间，保留来源。'),
-    'tilecontract': ('../linescan_preprocess_v2/contract.json', 1, 'FPGA 预处理合同', 'packed Mono8、signed9、halo、控制寄存器和错误状态。'),
-    'tilehls': ('../linescan_preprocess_v2/hls/preprocess_tile.cpp', 1, 'FPGA 行缓存与窗口', '已综合并通过 RTL 协同仿真的预处理源码。'),
-    'tileruntime': ('../linescan_preprocess_v2/python/stream_pipeline.py', 1, '条带与横向拼接', '复用已验证模块，按全局行序恢复核心区。'),
-    'tilemmio': ('../linescan_preprocess_v2/python/mmio_runtime.py', 1, '真实硬件后端合同', '后续实现 DMA 映射与缓存同步；本演示不执行此硬件路径。'),
-    'entry': ('core/sg3000_capture.c', 120, '应用入口', 'main 决定检查或采集；152 行打开驱动，166 行检查，172 行采集，180 行保存。'),
-    'flow': ('core/sg3000_capture_core.c', 149, '连续接收核心', 'begin 只启动一次，next 连续取块，end 统一停止；原单帧入口复用这三个阶段。'),
-    'stream': ('core/sg_stream_main.c', 1, '连续程序入口', '硬件或合成输入、处理后端选择、SGJSON 结果输出和停止状态。'),
-    'queue': ('core/sg_pipeline.c', 1, '接收与处理队列', '有界队列、缓冲区所有权、队列满时停止、处理与输出错误传播。'),
-    'processing': ('core/sg_processing.h', 1, '算法交接接口', '图像尺寸、行偏移、编号、时间戳及结果结构；指针不等于 DMA 地址。'),
-    'plabi': ('core/sg_pl_uapi.h', 1, 'FPGA 驱动接口约定', '待实现的 PL 内核驱动 ABI。尚未分配物理地址，不代表 FPGA 硬件已连接。'),
-    'hls': ('fpga/sg_image_stats.cpp', 1, 'HLS 参考模块', '图像与结果通过 AXI memory 接口交接；灰度统计是参考算法，不是缺陷判定。'),
-    'interfaces': ('docs/连续采集与处理接口.md', 1, '连续采集与接口说明', '数据路径、部署、输出格式与硬件验证边界。'),
-    'driver': ('core/sg3000_rx.c', 102, 'DMA 驱动', '102 行提交 DMA；158 行处理 ioctl；224 行识别并初始化 PCIe 卡。'),
-    'abi': ('core/sg3000_rx_uapi.h', 8, '应用与驱动接口', 'sg_dma 描述源地址、目标缓存、长度、超时和完成状态。'),
-    'types': ('core/sg3000_capture_core.h', 13, '数据结构', '硬件接口、会话、帧结构与采集结果。'),
-    'resume': ('board/resume.sh', 1, '板上启动脚本', '校验文件、加载驱动、执行 preflight；不会自动采图。'),
-    'guide': ('docs/使用说明.md', 1, '使用说明', '从连接到采集的操作步骤，以及当前限制。'),
-    'build': ('build/receiver.ps1', 1, '应用编译脚本', '使用 Vitis 2022.1 交叉编译器；产物进入 build/output，不覆盖已验证程序。'),
-    'module': ('build/module.sh', 1, '驱动编译脚本', '需要外部准备好的固定版本 Linux 内核树，以及 Image / symbols.json。'),
-    'transport': ('console/transport.py', 1, '串口与操作实现', '串口独占、命令完成标记、超时、板卡检查和采集操作。'),
-    'server': ('console/server.py', 1, '中控台服务', '仅监听本机，提供状态、操作、日志和源码接口。'),
-    'frontend': ('console/web/app.js', 1, '中控台界面逻辑', '界面状态更新、源码阅读与本地 PGM 查看。'),
-    'history': ('evidence/load-and-preflight.log', 1, '历史上板日志', '2026-10-23 的历史实测；不能代表当前连接或硬件状态。'),
-    'saved': ('evidence/sd-saved-verified.log', 1, 'SD 保存与读回', '历史日志中的哈希核对、SD 卸载和驱动卸载记录。'),
+    'entry': ('board/apps/sg_capture_main.c', 1, '单帧程序入口', '解析参数 → 打开设备 → 预检 / 采一帧 → 存 PGM → 可选经网口发送。'),
+    'acq': ('board/capture/sg_acq.c', 1, '采集生命周期', 'begin 只启动一次，next 连续取块，end 统一停止；单帧 = begin + next + end。'),
+    'block': ('board/capture/sg_block.c', 1, '块头与分块 DMA', '等块就绪 → 读块头 → 校验 → 64 KiB 一次 DMA。'),
+    'mailbox': ('board/capture/sg_mailbox.c', 1, '邮箱协议', '和卡上固件对话：发送、等待、取回、解析。'),
+    'preflight': ('board/capture/sg_preflight.c', 1, '只读预检', 'DDR、时钟、CL 配置、彩色、位深五项。'),
+    'iolinux': ('board/capture/sg_io_linux.c', 1, '回调表的 Linux 实现', '加锁、打开设备、INFO 检查，6 个回调翻译成 ioctl。'),
+    'stream': ('board/apps/sg_stream_main.c', 1, '连续程序入口', '硬件或合成输入、处理器选择、SGJSON 输出、可选网口。'),
+    'queue': ('board/stream/sg_pipeline.c', 1, '接收与处理队列', '有界队列、缓冲区所有权、队列满时停止、错误传播。'),
+    'processing': ('board/processing/sg_processing.h', 1, '处理器接口', '图像视图、处理结果、处理器回调表。'),
+    'candidates': ('board/processing/sg_candidates.c', 1, '颗粒候选检测', '列背景校正 → 阈值 → 8 邻接连通域 → 候选列表。'),
+    'tcp': ('board/transport/tx_tcp.c', 1, '网口发送', 'I6 协议：32 字节头 + 负载，CRC32。'),
+    'receiver': ('host/receiver/rx_tcp.py', 1, '网口接收', '电脑端校验并落盘；中控台内置同一份代码。'),
+    'driver': ('board/driver/sg3000_rx.c', 1, 'DMA 驱动', 'PCIe 绑定、寄存器白名单、DMA、出错隔离。'),
+    'abi': ('include/sg3000_rx_uapi.h', 1, '应用与驱动接口', '4 个 ioctl 的结构体。'),
+    'regs': ('include/sg3000_regs.h', 1, '寄存器表', '所有地址和魔数，每条标可信度。'),
+    'architecture': ('ARCHITECTURE.md', 1, '架构总览', '全链路、依赖方向、每个文件的状态。'),
+    'guide': ('docs/BRINGUP.md', 1, '上板步骤', '从拷贝 SD 卡到采到第一帧、连续检测。'),
+    'transport': ('host/console/transport.py', 1, '串口与操作实现', '串口独占、命令完成标记、超时、板卡检查和采集操作。'),
+    'server': ('host/console/server.py', 1, '中控台服务', '仅监听本机，提供状态、操作、日志和源码接口。'),
+    # 页面里按钮引用的旧编号，指向新仓库里对应的文件
+    'integration': ('ARCHITECTURE.md', 1, '架构总览', '全链路、依赖方向、每个文件的状态。'),
+    'firstframe': ('docs/BRINGUP.md', 1, '上板步骤', '从拷贝 SD 卡到采到第一帧。'),
+    'flow': ('board/capture/sg_acq.c', 1, '采集生命周期', 'begin / next / end。'),
+    'frames': ('host/detect/candidates.py', 1, '候选检测（Python 参考）', '和板上 C 同一算法，可离线跑本地 PGM。'),
+    'frameschema': ('docs/interfaces/schemas/frame-candidates-v1.schema.json', 1, '离线候选结果格式', '中控台离线检测用的格式。'),
+    'tilecontract': ('fpga/linescan_preprocess_v2/contract.json', 1, 'FPGA 预处理合同', 'packed Mono8、signed9、halo、控制寄存器和错误状态。'),
+    'history': ('docs/decisions/D003_no_binary_patch.md', 1, '历史：二进制补丁', '旧程序靠打补丁跳过 DDR 检查；新程序不再需要。历史上板日志不在仓库里。'),
+    'saved': ('docs/BRINGUP.md', 1, '上板步骤', '历史 SD 读回日志不在仓库里；按新步骤重新验证。'),
 }
 
 
@@ -111,15 +112,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(200, self.server.console.state(int(query.get('after', ['0'])[0])))
             elif parsed.path == '/api/source':
                 file = FILES[query.get('id', ['entry'])[0]]
-                path = ROOT / file[0]
+                path = REPO / file[0]
                 self.send(200, dict(path=str(path), text=path.read_text(encoding='utf-8', errors='replace'), line=file[1], guide=file[3]))
             elif parsed.path == '/api/log':
                 self.send(200, self.server.console.log_path.read_bytes(), 'text/plain; charset=utf-8')
-            elif parsed.path == '/api/addon':
-                self.send(200, (ROOT/'board'/'sg3000-stream-v0.2.zip').read_bytes(), 'application/zip')
             elif parsed.path == '/api/captures/preview':
                 name = Path(query.get('name', [''])[0]).name
-                captures_dir = Path('D:/SG3000_Captures')
+                captures_dir = CAPTURES
                 preview_file = captures_dir / (Path(name).stem + '_preview.png')
                 if preview_file.is_file():
                     self.send(200, preview_file.read_bytes(), 'image/png')
@@ -140,7 +139,7 @@ class Handler(BaseHTTPRequestHandler):
                     else:
                         self.send(404, {'error': '图像未找到。'})
             elif parsed.path == '/api/captures/list':
-                captures_dir = Path('D:/SG3000_Captures')
+                captures_dir = CAPTURES
                 captures_dir.mkdir(parents=True, exist_ok=True)
                 items = []
                 for p in sorted(captures_dir.glob('*.pgm'), key=lambda x: x.stat().st_mtime, reverse=True):
@@ -152,7 +151,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(200, path.read_bytes(), kind + '; charset=utf-8')
             else:
                 self.send(404, {'error': '入口不存在。'})
-        except (ValueError, KeyError, OSError, RuntimeError) as exc:
+        except (ValueError, KeyError, OSError, RuntimeError, ImportError) as exc:
             self.send(400, {'error': str(exc)})
 
     def do_POST(self):

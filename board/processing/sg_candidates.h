@@ -54,4 +54,17 @@ int sg_candidates_find(const struct sg_image_view *v, const struct sg_background
                        const struct sg_candidate_params *p,
                        struct sg_candidate *out, uint32_t capacity, uint32_t *count);
 
+/* ---- 作为流水线处理器（sg_processor）使用 ----
+ * 每块调一次 sg_candidates_find，候选留在处理器里，由结果出口（tx_tcp_sink）取走。
+ * 处理结果里：algorithm = 2；above_threshold = 候选个数；sum/min/max 照常是灰度统计；
+ *             decision 恒为 UNKNOWN（候选不是判定）。
+ * bg 可为 NULL；不为 NULL 时内容会被复制，调用者之后可以释放。 */
+#define SG_CANDIDATES_ALGORITHM 2
+int sg_candidates_open(struct sg_processor *p, const struct sg_candidate_params *params,
+                       const struct sg_background *bg);
+
+/* 取最近一块的候选。指针在下一次 process 之前有效（和 process 在同一线程里调用）。 */
+int sg_candidates_last(const struct sg_processor *p, const struct sg_candidate **c,
+                       uint32_t *count, int *truncated);
+
 #endif

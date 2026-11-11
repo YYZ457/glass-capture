@@ -63,7 +63,7 @@ function update(s) {
   $('stream-count').textContent=unknown?'—':ended?.processed ?? result.processed_total ?? '—';
   $('stream-block').textContent=!unknown&&result.sequence ? `${result.block_id} / ${result.width} × ${result.height}` : '—';
   $('stream-gray').textContent=!unknown&&result.pixel_count ? `${result.min}–${result.max} / ${(Number(result.sum)/Number(result.pixel_count)).toFixed(2)}` : '—';
-  $('stream-decision').textContent=unknown?'停止未确认，结果不可确认':streamError?'会话异常，结果需核查':result.decision==='pass'?'算法报告合格（需验证）':result.decision==='fail'?'算法报告缺陷（需验证）':'未作缺陷判定';
+  $('stream-decision').textContent=unknown?'停止未确认，结果不可确认':streamError?'会话异常，结果需核查':result.decision==='pass'?'算法报告合格（需验证）':result.decision==='fail'?'算法报告缺陷（需验证）':result.processor==='candidates'&&result.sequence?`本块候选 ${result.above_threshold} 个（未判定）`:'未作缺陷判定';
   if(unknown) $('stream-summary').textContent='尚未确认连续接收程序已停止。请检查终端日志与板上进程；之前的算法结论不能作为本次结果。';
   else if(ended) $('stream-summary').textContent=`${replay?'离线回放结果':'本次会话'}：接收 ${ended.received ?? '—'} 块，处理 ${ended.processed ?? '—'} 块；队列峰值 ${ended.queue_peak ?? '—'}，队列满 ${ended.queue_full_events ?? '—'} 次，编号不连续 ${ended.id_discontinuities ?? '—'} 次。错误：总计 ${ended.error ?? '未报告'} / 输入 ${ended.source_error ?? '未报告'} / 处理 ${ended.processing_error ?? '未报告'} / 输出 ${ended.output_error ?? '未报告'} / 停止 ${ended.stop_error ?? '未报告'}。`;
   else if(streamError) $('stream-summary').textContent='会话报告输入、处理、输出或停止错误，请检查终端日志；当前结果需核查。';
@@ -73,12 +73,14 @@ function update(s) {
     const basic = ['probe','dmesg','fetch_last'].includes(b.dataset.action);
     b.disabled = !s.connected || !s.shell_ready || s.busy || (!basic && !s.identity_ok);
   });
+  $('net-setup').disabled = !s.connected || !s.shell_ready || s.busy || !s.identity_ok;
+  $('net-state').textContent = s.net && s.net.pc_ip ? `网口已通：板子 → 电脑 ${s.net.pc_ip}:${s.net.port}。回传和连续候选走网口。` : '网口未配置：回传走 USB 串口。先「从 SD 加载程序」，再填 IP 测试。';
   const fields = s.checks.fields || {}, p = s.checks.preflight, live = s.connected;
   $('linux-state').textContent = fields.KERNEL ? (live ? '已读内核 · ' : '断开前 · ') + fields.KERNEL : '等待检查';
   $('pci-state').textContent = fields.VENDOR ? (live ? '' : '断开前 · ') + fields.VENDOR + ':' + fields.DEVICE : '等待检查';
   const trusted = p?.known && p.reads_confirmed;
   $('clock-state').textContent = trusted ? (live ? '' : '断开前 · ') + (p.clocks & 1 ? '上次检查已锁定' : '上次检查未锁定') : '等待信号检查';
-  $('dma-state').textContent = s.last_frame ? (s.last_frame.local_path ? '已存 D:\\SG3000_Captures' : '已确认板上保存图像') : '尚未确认图像接收';
+  $('dma-state').textContent = s.last_frame ? (s.last_frame.local_path ? '已存到电脑' : '已确认板上保存图像') : '尚未确认图像接收';
   $('ddr').textContent = trusted ? (p.ddr === 0 ? '0 · 条件满足' : p.ddr === 2 ? '2 · DDR 校准完成' : String(p.ddr) + ' · 需核实') : '未确认读取';
   $('clock').textContent = trusted ? (p.clocks & 1 ? '锁定' : '未锁定') + ' / 0x' + p.clocks.toString(16) : '未确认读取';
   $('format').textContent = p?.passed && p.config ? 'Base / Mono8' : 'Mono8 (8-bit 灰度)';
@@ -86,7 +88,7 @@ function update(s) {
   if ($('camera-geo')) $('camera-geo').textContent = s.last_frame?.width ? `${s.last_frame.width} × ${s.last_frame.height} (16K 基础)` : '4096 × 2000 (16K 线扫 / 4K ROI)';
   if ($('pci-hw')) $('pci-hw').textContent = fields.VENDOR ? `${fields.VENDOR}:${fields.DEVICE} · sg3000_rx` : '0x4c54:0x3000 · C2H0';
   $('prepared').textContent = s.checks.prepared ? '已加载到板上 /tmp' : '尚未由中控台加载';
-  if ($('local-dir')) $('local-dir').textContent = 'D:\\SG3000_Captures';
+  if ($('local-dir') && s.captures) { $('local-dir').textContent = s.captures; $('local-dir').title = s.captures; }
   $('observed-at').textContent = p?.at || s.checks.at || '尚无本次实测';
   $('terminal-status').textContent = s.busy ? '操作进行中' : s.connected ? (s.shell_ready ? '终端就绪' : '等待 root 提示符') : '串口未连接';
   if (s.job) {
@@ -136,6 +138,10 @@ $('connect').onclick=()=>post('connect',{port:$('port').value}); $('disconnect')
 $('refresh').onclick=refreshPorts; $('wake').onclick=()=>post('wake'); $('interrupt').onclick=()=>post('interrupt');
 $('shutdown').onclick=async()=>{try{await api('shutdown',{});toast('本机服务已关闭；下次双击桌面入口即可重新启动。');}catch(e){toast(e.message,true);}};
 $('replay').onclick=()=>post('action',{action:'replay'});
+try { $('net-pc').value = localStorage.getItem('sg-net-pc') || ''; $('net-board').value = localStorage.getItem('sg-net-board') || ''; } catch {}
+$('net-setup').onclick=()=>{ const pc=$('net-pc').value.trim(), board=$('net-board').value.trim();
+  try { localStorage.setItem('sg-net-pc', pc); localStorage.setItem('sg-net-board', board); } catch {}
+  post('action',{action:'network',options:{pc_ip:pc,board_ip:board}}); };
 $('start-stream').onclick=()=>post('action',{action:'stream',options:{seconds:Number($('stream-seconds').value),processor:$('stream-processor').value}});
 $('copy-path').onclick=async()=>{try{await navigator.clipboard.writeText(sourcePath);toast('源码完整路径已复制');}catch{toast(sourcePath,true);}};
 $('export').onclick=async()=>{try{const r=await fetch('/api/log');if(!r.ok)throw new Error('导出失败');const blob=await r.blob(),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='sg3000-session-'+new Date().toISOString().replace(/[:.]/g,'-')+'.jsonl';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);}catch(e){toast(e.message,true);}};
@@ -190,5 +196,5 @@ $('pgm').onchange=async e=>{
     ctx.putImageData(data,0,0);canvas.hidden=false;$('image-empty').hidden=true;$('image-info').textContent=`本地导入 / ${file.name} · ${img.w} × ${img.h} · min ${min} / max ${max} / mean ${(sum/img.pixels.length).toFixed(2)} · 非硬件验证结果`;
   }catch(err){toast(err.message,true);}finally{e.target.value='';}
 };
-async function init(){try{const data=await api('bootstrap');token=data.token;files=data.files;$('project-root').textContent=data.root;for(const f of files){const b=document.createElement('button');b.className='source-file';b.dataset.id=f.id;const title=document.createElement('span');title.textContent=f.title;const small=document.createElement('small');small.textContent=f.path;b.append(title,small);b.onclick=()=>showSource(f.id);$('source-files').append(b);}await showSource('integration');showView('defect-view');document.dispatchEvent(new Event('workbench-ready'));await refreshPorts();await poll();setInterval(poll,700);}catch(e){toast('中控台初始化失败：'+e.message,true);}}
+async function init(){try{const data=await api('bootstrap');token=data.token;files=data.files;$('project-root').textContent=data.root;for(const f of files){const b=document.createElement('button');b.className='source-file';b.dataset.id=f.id;const title=document.createElement('span');title.textContent=f.title;const small=document.createElement('small');small.textContent=f.path;b.append(title,small);b.onclick=()=>showSource(f.id);$('source-files').append(b);}await showSource('architecture');showView('defect-view');document.dispatchEvent(new Event('workbench-ready'));await refreshPorts();await poll();setInterval(poll,700);}catch(e){toast('中控台初始化失败：'+e.message,true);}}
 init();

@@ -4,12 +4,12 @@
  *
  * 组装：
  *   数据源   sg_source      ← 硬件（sg_io_linux + sg_acq 的 begin/next/end）或 合成（--source synthetic）
- *   处理器   sg_processor   ← sg_stats
- *   出口     sg_result_sink ← tx_jsonl
+ *   处理器   sg_processor   ← sg_stats，或 sg_candidates（--processor candidates）
+ *   出口     sg_result_sink ← tx_jsonl（stdout），加 --tcp 时前面再串一个 tx_tcp_sink
  *   引擎     sg_pipeline_run
  *
  * 迁移来源：legacy sg_stream_main.c。命令行和输出的 SGJSON 行与 legacy 一致，
- *   区别：去掉 --processor pl（D001）；新增 --device。
+ *   区别：去掉 --processor pl（D001）；新增 --device、--processor candidates、--tcp 等。
  * 怎么验证：先 --source synthetic 跑通，再接硬件跑 100 块。
  * 状态：🟡 合成源电脑上跑过；硬件源从没在实机上跑过
  */
@@ -31,6 +31,8 @@
 #include "sg_acq.h"
 #include "sg_pipeline.h"
 #include "tx_jsonl.h"
+#include "tx_tcp.h"
+#include "sg_candidates.h"
 #include "sg_err.h"
 
 static volatile sig_atomic_t stopped;
@@ -124,11 +126,62 @@ static uint64_t number(const char *s, uint64_t max)
 static void usage(void)
 {
     puts("sg3000-stream 0.2 / interface ABI 1\n"
-         "--source hardware|synthetic --processor stats --seconds 30 (0=until stopped)\n"
+         "--source hardware|synthetic --processor stats|candidates --seconds 30 (0=until stopped)\n"
          "--max-blocks 0 --queue 4 --max-frame-mib 16 --block-policy observe|strict\n"
-         "--process-timeout-ms 2000 --emit-ms 1000 --threshold 128 --device PATH\n"
+         "--process-timeout-ms 2000 --emit-ms 1000 --threshold 128 (candidates: 25) --device PATH\n"
+         "Candidates: --min-area 2 --max-area 0 --max-candidates 4096 --background FILE.csv\n"
+         "Network: --tcp IP[:PORT] (send candidates per block) --tcp-frame-every 0 (send raw block every N)\n"
          "Synthetic only: --width 256 --height 64 --synthetic-delay-ms 50\n"
          "Output: SGJSON lines to stdout; no automatic image/result files or external actuation.");
+}
+
+/* 读 verify/V3 --save-background 写出的 CSV（表头 x,mean,sigma，x 从 0 连续）。 */
+static int load_background(const char *path, float **mean_out, uint32_t *width_out)
+{
+    FILE *f = fopen(path, "r");
+    char line[128];
+    float *mean = NULL;
+    uint32_t n = 0, cap = 0;
+    int ret = 0;
+
+    if (f == NULL) {
+        return -errno;
+    }
+    if (!fgets(line, sizeof(line), f) || strncmp(line, "x,mean,sigma", 12)) {
+        fclose(f);
+        return -EINVAL;
+    }
+    while (fgets(line, sizeof(line), f)) {
+        unsigned x;
+        float m, sd;
+
+        if (sscanf(line, "%u,%f,%f", &x, &m, &sd) != 3 || x != n || x >= 65536) {
+            ret = -EINVAL;
+            break;
+        }
+        if (n == cap) {
+            float *grown;
+            cap = cap ? cap * 2 : 4096;
+            grown = realloc(mean, cap * sizeof(*mean));
+            if (grown == NULL) {
+                ret = -ENOMEM;
+                break;
+            }
+            mean = grown;
+        }
+        mean[n++] = m;
+    }
+    fclose(f);
+    if (!ret && n == 0) {
+        ret = -EINVAL;
+    }
+    if (ret) {
+        free(mean);
+        return ret;
+    }
+    *mean_out = mean;
+    *width_out = n;
+    return 0;
 }
 
 /* ==== 硬件源的准备：打开 → 会话 → begin → 打印 preflight 事件 =========== */
@@ -172,9 +225,17 @@ int main(int argc, char **argv)
         {"block-policy", 1, 0, 'b'}, {"process-timeout-ms", 1, 0, 't'},
         {"emit-ms", 1, 0, 'e'}, {"threshold", 1, 0, 'r'}, {"width", 1, 0, 'w'},
         {"height", 1, 0, 'h'}, {"synthetic-delay-ms", 1, 0, 'i'}, {"device", 1, 0, 'D'},
+        {"min-area", 1, 0, 'A'}, {"max-area", 1, 0, 'B'}, {"max-candidates", 1, 0, 'C'},
+        {"background", 1, 0, 'G'}, {"tcp", 1, 0, 'T'}, {"tcp-frame-every", 1, 0, 'F'},
         {"version", 0, 0, 'v'}, {"help", 0, 0, '?'}, {0, 0, 0, 0}};
     const char *source_name = "hardware", *processor_name = "stats";
-    const char *device = SG_DEFAULT_DEVICE;
+    const char *device = SG_DEFAULT_DEVICE, *background_path = NULL, *tcp_target = NULL;
+    struct sg_candidate_params cand = { 0, 2, 0, 4096 };
+    struct tx_tcp tcp = { -1, 0 };
+    struct tx_tcp_sink tcp_sink;
+    float *bg_mean = NULL;
+    uint32_t bg_width = 0, frame_every = 0;
+    int threshold_given = 0;
     struct sg_pipeline_options o = {
         .queue_depth = 4, .processing_timeout_ms = 2000, .max_blocks = 0,
         .duration_ms = 30000, .max_frame_bytes = 16u * 1024u * 1024u, .cancel = &stopped };
@@ -211,7 +272,13 @@ int main(int argc, char **argv)
             break;
         case 't': o.processing_timeout_ms = (unsigned)number(optarg, 60000); break;
         case 'e': emit_ms = number(optarg, 60000); break;
-        case 'r': threshold = (uint32_t)number(optarg, 255); break;
+        case 'r': threshold = (uint32_t)number(optarg, 255); threshold_given = 1; break;
+        case 'A': cand.min_area = (uint32_t)number(optarg, 1u << 24); break;
+        case 'B': cand.max_area = (uint32_t)number(optarg, 1u << 24); break;
+        case 'C': cand.max_candidates = (uint32_t)number(optarg, SG_CANDIDATES_MAX_LABELS); break;
+        case 'G': background_path = optarg; break;
+        case 'T': tcp_target = optarg; break;
+        case 'F': frame_every = (uint32_t)number(optarg, 1000000); break;
         case 'w': synthetic.width = (uint32_t)number(optarg, 32768); break;
         case 'h': synthetic.height = (uint32_t)number(optarg, 32768); break;
         case 'i': synthetic.delay = (uint32_t)number(optarg, 10000); break;
@@ -224,7 +291,8 @@ int main(int argc, char **argv)
     }
     if (optind != argc ||
         (strcmp(source_name, "hardware") && strcmp(source_name, "synthetic")) ||
-        strcmp(processor_name, "stats") ||
+        (strcmp(processor_name, "stats") && strcmp(processor_name, "candidates")) ||
+        (frame_every && !tcp_target) ||
         !o.queue_depth || !o.max_frame_bytes || !o.processing_timeout_ms || !emit_ms ||
         o.max_frame_bytes * (o.queue_depth + 2u) > UINT64_C(512) * 1024 * 1024 ||
         !synthetic.width || !synthetic.height ||
@@ -252,10 +320,47 @@ int main(int argc, char **argv)
     output.interval_ns = emit_ms * 1000000u;
     tx_jsonl_sink(&output, &sink);
 
-    /* ---- 组装 ---- */
-    ret = sg_stats_open(&processor, threshold);
+    /* ---- 组装：处理器 ---- */
+    if (!strcmp(processor_name, "candidates")) {
+        struct sg_background bg = { 0, NULL, NULL };
+
+        cand.threshold = threshold_given ? threshold : 25;
+        if (background_path) {
+            ret = load_background(background_path, &bg_mean, &bg_width);
+            if (ret) {
+                fprintf(stderr, "Cannot load background %s\n", background_path);
+                goto done;
+            }
+            bg.width = bg_width;
+            bg.column_mean = bg_mean;
+        }
+        ret = sg_candidates_open(&processor, &cand, background_path ? &bg : NULL);
+    } else {
+        ret = sg_stats_open(&processor, threshold);
+    }
     if (ret) {
         goto done;
+    }
+
+    /* ---- 组装：网口出口串在 stdout 出口前面 ---- */
+    if (tcp_target) {
+        char ip[16];
+        uint16_t port;
+
+        ret = tx_tcp_parse_target(tcp_target, ip, &port);
+        if (!ret) {
+            ret = tx_tcp_connect(&tcp, ip, port, 3000);
+        }
+        if (ret) {
+            fprintf(stderr, "Cannot connect to %s\n", tcp_target);
+            goto done;
+        }
+        memset(&tcp_sink, 0, sizeof(tcp_sink));
+        tcp_sink.tcp = &tcp;
+        tcp_sink.candidates = !strcmp(processor_name, "candidates") ? &processor : NULL;
+        tcp_sink.frame_every = frame_every;
+        tcp_sink.next = sink;
+        tx_tcp_sink(&tcp_sink, &sink);
     }
     if (o.synthetic) {
         source = (struct sg_source){ &synthetic, synthetic_next, synthetic_stop };
@@ -306,6 +411,12 @@ done:
     if (!ret) {
         ret = e;
     }
+    if (tcp.fd >= 0) {
+        line[strcspn(line, "\n")] = '\0';
+        (void)tx_tcp_send_status(&tcp, 0, line + 7, 2000);   /* 去掉 "SGJSON " 前缀 */
+        tx_tcp_close(&tcp);
+    }
+    free(bg_mean);
 
     if (processor.close) {
         processor.close(processor.context);

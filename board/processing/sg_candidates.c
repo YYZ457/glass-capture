@@ -248,3 +248,129 @@ out:
     free(own_mean);
     return ret;
 }
+
+/* ==== 处理器包装 ======================================================= */
+
+struct cand_proc {
+    struct sg_candidate_params params;
+    float *mean;                    /* 背景副本，NULL = 用每块自己的列均值 */
+    uint32_t bg_width;
+    struct sg_candidate *items;
+    uint32_t capacity, count;
+    int truncated;
+};
+
+static int cand_process(void *context, const struct sg_image_view *v, uint32_t timeout_ms,
+                        struct sg_processing_result *r)
+{
+    struct cand_proc *cp = context;
+    struct sg_background bg;
+    uint32_t x, y;
+    int ret;
+
+    (void)timeout_ms;   /* 第一版没有中途超时检查；流水线的队列满检测兜底 */
+    cp->count = 0;
+    cp->truncated = 0;
+    ret = sg_view_validate(v);
+    if (ret) {
+        return ret;
+    }
+    if (r == NULL) {
+        return -EINVAL;
+    }
+    if (cp->mean != NULL) {
+        if (cp->bg_width != v->width) {
+            return -EINVAL;         /* 背景是按另一种宽度标定的 */
+        }
+        bg.width = cp->bg_width;
+        bg.column_mean = cp->mean;
+        bg.column_sigma = NULL;
+    }
+    ret = sg_candidates_find(v, cp->mean ? &bg : NULL, &cp->params,
+                             cp->items, cp->capacity, &cp->count);
+    if (ret < 0) {
+        return ret;
+    }
+    cp->truncated = ret == SG_CANDIDATES_TRUNCATED;
+
+    memset(r, 0, sizeof(*r));
+    r->abi = SG_PROCESS_ABI;
+    r->algorithm = SG_CANDIDATES_ALGORITHM;
+    r->decision = SG_UNKNOWN;
+    r->sequence = v->sequence;
+    r->first_line = v->first_line;
+    r->pixel_count = (uint64_t)v->width * v->height;
+    r->above_threshold = cp->count;
+    r->minimum = 255;
+    for (y = 0; y < v->height; ++y) {
+        const unsigned char *row = v->pixels + (size_t)y * v->stride;
+        for (x = 0; x < v->width; ++x) {
+            r->sum += row[x];
+            if (row[x] < r->minimum) r->minimum = row[x];
+            if (row[x] > r->maximum) r->maximum = row[x];
+        }
+    }
+    return 0;
+}
+
+static void cand_close(void *context)
+{
+    struct cand_proc *cp = context;
+
+    if (cp != NULL) {
+        free(cp->mean);
+        free(cp->items);
+        free(cp);
+    }
+}
+
+int sg_candidates_open(struct sg_processor *p, const struct sg_candidate_params *params,
+                       const struct sg_background *bg)
+{
+    struct cand_proc *cp;
+
+    if (p == NULL || params == NULL || !params_valid(params) ||
+        params->max_candidates == 0 || params->max_candidates > SG_CANDIDATES_MAX_LABELS) {
+        return -EINVAL;
+    }
+    if (bg != NULL && (bg->width == 0 || bg->column_mean == NULL)) {
+        return -EINVAL;
+    }
+    cp = calloc(1, sizeof(*cp));
+    if (cp == NULL) {
+        return -ENOMEM;
+    }
+    cp->params = *params;
+    cp->capacity = params->max_candidates;
+    cp->items = malloc((size_t)cp->capacity * sizeof(*cp->items));
+    if (bg != NULL) {
+        cp->bg_width = bg->width;
+        cp->mean = malloc((size_t)bg->width * sizeof(*cp->mean));
+        if (cp->mean != NULL) {
+            memcpy(cp->mean, bg->column_mean, (size_t)bg->width * sizeof(*cp->mean));
+        }
+    }
+    if (cp->items == NULL || (bg != NULL && cp->mean == NULL)) {
+        cand_close(cp);
+        return -ENOMEM;
+    }
+    p->context = cp;
+    p->process = cand_process;
+    p->close = cand_close;
+    return 0;
+}
+
+int sg_candidates_last(const struct sg_processor *p, const struct sg_candidate **c,
+                       uint32_t *count, int *truncated)
+{
+    const struct cand_proc *cp;
+
+    if (p == NULL || p->process != cand_process || c == NULL || count == NULL || truncated == NULL) {
+        return -EINVAL;
+    }
+    cp = p->context;
+    *c = cp->items;
+    *count = cp->count;
+    *truncated = cp->truncated;
+    return 0;
+}

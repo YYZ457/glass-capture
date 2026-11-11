@@ -2,9 +2,11 @@
  *
  * sg3000-capture —— 单帧采集程序。
  *
- * 用法（与 legacy 完全一致，中控台依赖这个命令行格式）：
+ * 用法（前两条与 legacy 完全一致，中控台依赖这个命令行格式）：
  *   sg3000-capture preflight [--device PATH]
- *   sg3000-capture capture --output FILE.pgm [--device PATH] [--timeout-ms N]
+ *   sg3000-capture capture --output FILE.pgm [--device PATH] [--timeout-ms N] [--send IP[:PORT]]
+ *   sg3000-capture send FILE.pgm --to IP[:PORT]     把一张图经网口发给电脑（rx_tcp.py）
+ *   sg3000-capture version
  *
  * 组装：sg_io_linux（加锁、打开、INFO 检查）→ sg_session → sg_capture_once → pgm_write
  * 本文件只做"解析参数 + 组装 + 打印结果"，不含任何协议细节。
@@ -34,7 +36,11 @@
 #include "sg_io_linux.h"
 #include "sg_acq.h"
 #include "pgm_write.h"
+#include "tx_tcp.h"
 #include "sg_err.h"
+
+#define VERSION_TEXT     "sg3000-capture 1.0 ABI 1"
+#define SEND_TIMEOUT_MS  10000u
 
 /* Ctrl+C 处理函数只做一件事：把标志置 1。真正的中止由协议层在检查点读到标志后完成。 */
 static volatile sig_atomic_t interrupted;
@@ -48,7 +54,9 @@ static void interrupt_handler(int number)
 static void usage(void)
 {
     puts("Usage: sg3000-capture preflight [--device PATH]\n"
-         "       sg3000-capture capture --output PATH [--device PATH] [--timeout-ms 1..60000]\n"
+         "       sg3000-capture capture --output PATH [--device PATH] [--timeout-ms 1..60000] [--send IP[:PORT]]\n"
+         "       sg3000-capture send FILE.pgm --to IP[:PORT]\n"
+         "       sg3000-capture version\n"
          "Default device: /dev/sg3000_rx_0000:01:00.0\n"
          "Capture explicitly enables the experimental port-0 acquisition sequence.");
 }
@@ -76,10 +84,56 @@ static int parse_timeout(const char *text, uint32_t *out)
     return 0;
 }
 
+/* 经网口发一块图给电脑。成功打印一行 "Sent frame: ..."。 */
+static int send_frame(const struct sg_capture_frame *frame, const char *target)
+{
+    struct tx_tcp tcp;
+    char ip[16];
+    uint16_t port;
+    int ret;
+
+    ret = tx_tcp_parse_target(target, ip, &port);
+    if (ret) {
+        return ret;
+    }
+    ret = tx_tcp_connect(&tcp, ip, port, 3000);
+    if (ret) {
+        return ret;
+    }
+    ret = tx_tcp_send_frame(&tcp, frame, SEND_TIMEOUT_MS);
+    tx_tcp_close(&tcp);
+    if (!ret) {
+        printf("Sent frame: %u x %u, %zu bytes to %s:%u\n",
+               frame->width, frame->height, frame->length, ip, port);
+    }
+    return ret;
+}
+
+/* sg3000-capture send FILE.pgm --to IP[:PORT]：不碰采集卡，只读文件、发网口。 */
+static int send_main(int argc, char **argv)
+{
+    struct sg_capture_frame frame;
+    int ret;
+
+    if (argc != 5 || strcmp(argv[3], "--to")) {
+        usage();
+        return 2;
+    }
+    ret = pgm_read(argv[2], &frame, SG_CAPTURE_MAX_BYTES);
+    if (!ret) {
+        ret = send_frame(&frame, argv[4]);
+        sg_capture_frame_free(&frame);
+    }
+    if (ret) {
+        fprintf(stderr, "Failed: %s (%d)\n", strerror(-ret), ret);
+    }
+    return ret ? 1 : 0;
+}
+
 int main(int argc, char **argv)
 {
     const char *device = SG_DEFAULT_DEVICE;
-    const char *output = NULL;
+    const char *output = NULL, *send_to = NULL;
     struct sg_capture_options options;
     struct sg_capture_session session;
     struct sg_capture_result result;
@@ -98,6 +152,13 @@ int main(int argc, char **argv)
         usage();
         return argc < 2;
     }
+    if (!strcmp(argv[1], "version")) {
+        puts(VERSION_TEXT);
+        return 0;
+    }
+    if (!strcmp(argv[1], "send")) {
+        return send_main(argc, argv);
+    }
     capture = !strcmp(argv[1], "capture");
     if (!capture && strcmp(argv[1], "preflight")) {
         usage();
@@ -108,6 +169,8 @@ int main(int argc, char **argv)
             device = argv[++i];
         } else if (!strcmp(argv[i], "--output") && i + 1 < argc && capture && !output) {
             output = argv[++i];
+        } else if (!strcmp(argv[i], "--send") && i + 1 < argc && capture) {
+            send_to = argv[++i];
         } else if (!strcmp(argv[i], "--timeout-ms") && i + 1 < argc && capture) {
             if (parse_timeout(argv[++i], &options.frame_timeout_ms)) {
                 usage();
@@ -180,6 +243,10 @@ int main(int argc, char **argv)
                 printf("Saved complete Mono8 frame: %u x %u, %zu bytes, block %u, %u packets: %s\n",
                        result.frame.width, result.frame.height, result.frame.length,
                        result.frame.block_id, result.frame.packets, output);
+                fflush(stdout);
+                if (send_to) {
+                    ret = send_frame(&result.frame, send_to);   /* 图已经存好；发送失败只影响退出码 */
+                }
             }
         }
         sg_capture_frame_free(&result.frame);

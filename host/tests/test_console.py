@@ -60,6 +60,8 @@ class FakeSerial:
                     rc = 1
             elif 'capture --timeout' in wire:
                 body = 'DDRInitialStatus=0, CameraLinkPixelClocks=0x00000001, CL=0, Color=0, Depth=8\nSaved complete Mono8 frame: 16 x 8, 128 bytes, block 1, 1 packets: /tmp/fake.pgm\n'
+            elif wire.count('version') and ('capture version' in wire or 'stream --version' in wire):
+                body = 'sg3000-capture 1.0 ABI 1\n' if 'capture version' in wire else 'sg3000-stream 0.2 ABI 1\n'
             elif 'sha256sum' in wire and self.mode == 'bad-hash':
                 body, rc = 'sg3000-capture: FAILED\n', 1
             elif self.mode == 'no-marker':
@@ -130,6 +132,8 @@ class ConsoleTests(unittest.TestCase):
         self.assertIn('sha256sum -c SHA256SUMS', commands)
         self.assertIn('umount /mnt/sg3000-console', commands)
         self.assertIn('fi && test -e', commands)
+        self.assertIn('sg3000-capture version', commands)
+        self.assertNotIn('dd if=', commands)          # D003：不再给二进制打补丁
 
     def test_prepare_hash_failure_still_unmounts_and_never_loads(self):
         self.connect(); self.job('probe'); self.c.port.mode = 'bad-hash'
@@ -248,7 +252,7 @@ class HTTPTests(unittest.TestCase):
             self.assertIn('采集中控台', r.read().decode())
             self.assertIn("frame-ancestors 'none'", r.headers['Content-Security-Policy'])
         for key, (path, *_) in server.FILES.items():
-            self.assertTrue((ROOT/path).is_file(), path)
+            self.assertTrue((ROOT.parent/path).is_file(), path)
             with urllib.request.urlopen(self.url+'/api/source?id='+key) as r:
                 self.assertTrue(json.load(r)['text'])
         with self.assertRaises(urllib.error.HTTPError) as caught:

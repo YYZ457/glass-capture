@@ -6,7 +6,7 @@
  *   0 "GCAP"   4 u16 版本=1   6 u16 类型   8 u64 序号   16 u32 block_id
  *   20 u32 负载字节数   24 u32 负载 CRC32（和 Python zlib.crc32 相同）   28 u32 保留=0
  * 类型 1 原图块：u32 width, u32 height, width×height 字节
- * 类型 2 候选：  u32 count, 再 count × 32 字节（x0 y0 x1 y1 area peak 各 u32，cx cy 各 f32）
+ * 类型 2 候选：  u32 count, u32 flags（bit0 = 截断）, 再 count × 32 字节（x0 y0 x1 y1 area peak 各 u32，cx cy 各 f32）
  * 类型 3 状态：  一行 JSON（不带换行）
  *
  * 怎么验证：电脑上跑 rx_tcp.py，发一块已知图，收到的 PGM 的 SHA256 一致。
@@ -222,24 +222,30 @@ void tx_tcp_close(struct tx_tcp *t)
 
 /* ==== 三种消息 ========================================================= */
 
-int tx_tcp_send_frame(struct tx_tcp *t, const struct sg_capture_frame *f, uint32_t timeout_ms)
+static int send_pixels(struct tx_tcp *t, uint32_t block_id, const unsigned char *pixels,
+                       uint32_t width, uint32_t height, uint32_t timeout_ms)
 {
     unsigned char prefix[8];
 
+    put32(prefix, width);
+    put32(prefix + 4, height);
+    return send_message(t, TYPE_FRAME, block_id, prefix, sizeof(prefix),
+                        pixels, (size_t)width * height, timeout_ms);
+}
+
+int tx_tcp_send_frame(struct tx_tcp *t, const struct sg_capture_frame *f, uint32_t timeout_ms)
+{
     if (f == NULL || f->data == NULL || f->width == 0 || f->height == 0 ||
         (uint64_t)f->width * f->height != f->length) {
         return -EINVAL;
     }
-    put32(prefix, f->width);
-    put32(prefix + 4, f->height);
-    return send_message(t, TYPE_FRAME, f->block_id, prefix, sizeof(prefix),
-                        f->data, f->length, timeout_ms);
+    return send_pixels(t, f->block_id, f->data, f->width, f->height, timeout_ms);
 }
 
 int tx_tcp_send_candidates(struct tx_tcp *t, uint32_t block_id, const struct sg_candidate *c,
-                           uint32_t count, uint32_t timeout_ms)
+                           uint32_t count, int truncated, uint32_t timeout_ms)
 {
-    unsigned char prefix[4], *body;
+    unsigned char prefix[8], *body;
     uint32_t i;
     int ret;
 
@@ -267,6 +273,7 @@ int tx_tcp_send_candidates(struct tx_tcp *t, uint32_t block_id, const struct sg_
         put32(p + 28, fy);
     }
     put32(prefix, count);
+    put32(prefix + 4, truncated ? 1u : 0u);
     ret = send_message(t, TYPE_CANDS, block_id, prefix, sizeof(prefix),
                        body, (size_t)count * CAND_SIZE, timeout_ms);
     free(body);
@@ -279,4 +286,76 @@ int tx_tcp_send_status(struct tx_tcp *t, uint32_t block_id, const char *json, ui
         return -EINVAL;
     }
     return send_message(t, TYPE_STATUS, block_id, json, strlen(json), NULL, 0, timeout_ms);
+}
+
+/* ==== 小工具 =========================================================== */
+
+int tx_tcp_parse_target(const char *text, char *ip, uint16_t *port)
+{
+    const char *colon;
+    size_t n;
+
+    if (text == NULL || ip == NULL || port == NULL) {
+        return -EINVAL;
+    }
+    colon = strchr(text, ':');
+    n = colon ? (size_t)(colon - text) : strlen(text);
+    if (n == 0 || n > 15) {
+        return -EINVAL;
+    }
+    memcpy(ip, text, n);
+    ip[n] = '\0';
+    *port = TX_TCP_DEFAULT_PORT;
+    if (colon) {
+        char *end;
+        unsigned long v = strtoul(colon + 1, &end, 10);
+
+        if (*end || v == 0 || v > 65535) {
+            return -EINVAL;
+        }
+        *port = (uint16_t)v;
+    }
+    return 0;
+}
+
+/* ==== 流水线出口 ======================================================= */
+
+static int tcp_publish(void *context, const struct sg_image_view *view,
+                       const struct sg_processing_result *r, uint32_t timeout_ms)
+{
+    struct tx_tcp_sink *s = context;
+    int ret;
+
+    s->seen++;
+    if (s->candidates != NULL) {
+        const struct sg_candidate *c;
+        uint32_t count;
+        int truncated;
+
+        ret = sg_candidates_last(s->candidates, &c, &count, &truncated);
+        if (!ret) {
+            ret = tx_tcp_send_candidates(s->tcp, view->card_block_id, c, count, truncated, timeout_ms);
+        }
+        if (ret) {
+            return ret;
+        }
+    }
+    /* 抽样发原图：只在行紧挨着存放（stride == width）时能直接发 */
+    if (s->frame_every && s->seen % s->frame_every == 0 && view->stride == view->width) {
+        ret = send_pixels(s->tcp, view->card_block_id, view->pixels, view->width, view->height,
+                          timeout_ms);
+        if (ret) {
+            return ret;
+        }
+    }
+    if (s->next.publish != NULL) {
+        return s->next.publish(s->next.context, view, r, timeout_ms);
+    }
+    return 0;
+}
+
+void tx_tcp_sink(struct tx_tcp_sink *s, struct sg_result_sink *sink)
+{
+    sink->context = s;
+    sink->publish = tcp_publish;
 }

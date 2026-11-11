@@ -8,8 +8,10 @@
 
 ## 这个仓库是什么状态
 
-**骨架。** 结构、接口、每个文件的职责已经定好；大部分 `.c` 文件里只有函数签名和 `return -ENOSYS`，等待一个个填入确定的代码。
-现在能在板上跑的程序仍然来自 `legacy/`。
+**代码已写全，等上板。** 除了相机串口（`cam_serial`，缺硬件信息）和 PL 处理器（D001 决定不做），所有模块都有实现；
+电脑上有假卡测试、单元测试、模拟板子的中控台端到端测试。还没有一个新程序在真板子上跑过。
+
+**要上板：看 `docs/BRINGUP.md`。** 板上程序已编译好放在 `dist/glass-capture/`，拷到 SD 卡即可。
 
 ## 从哪读起
 
@@ -28,11 +30,15 @@
 ## 常用命令
 
 ```
+python host/console/launch.py                        # 启动中控台（Windows）
 make -C board check                                  # 电脑上检查所有接口能编译
-make -C board CROSS_COMPILE=aarch64-linux-gnu-       # 交叉编译板上程序
+make -C board test                                   # 假卡测试 + 单元测试
+python tools/make_sd_bundle.py                       # 交叉编译并生成 dist/glass-capture（需要 aarch64-linux-gnu-gcc）
 board/driver/module.sh                               # 构建驱动（需要对应内核源码）
 python -m pytest host/tests -q                       # 中控台测试
 ```
+
+`host/tests` 里离线检测演示（defects / frames）的测试需要原始 zip 包里的 `sample_output_16k/` 和预编译 DLL，仓库里没有，会报错；其余应全部通过。
 
 ## 不在这里的东西
 

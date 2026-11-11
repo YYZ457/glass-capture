@@ -44,10 +44,12 @@
       <section class="panel actions"><div class="section-title"><h2>操作序列</h2><span>由上到下</span></div>
         <button id="wake" class="action" disabled><b>00</b><div><strong>唤醒终端</strong><small>发送回车，等待 Linux root 提示符</small></div><span>↵</span></button>
         <button data-action="probe" class="action" disabled><b>01</b><div><strong>检查板卡</strong><small>板型、内核、PCIe 身份和 SD 卡</small></div><span>↗</span></button>
-        <button data-action="prepare" class="action" disabled><b>02</b><div><strong>从 SD 加载接收程序</strong><small>只读挂载、校验文件、加载驱动</small></div><span>↗</span></button>
+        <button data-action="prepare" class="action" disabled><b>02</b><div><strong>从 SD 加载程序</strong><small>只读挂载 SD/glass-capture、校验、拷贝三个程序、加载驱动</small></div><span>↗</span></button>
+        <button data-action="status" class="action" disabled><b>02½</b><div><strong>只读体检</strong><small>sg_status：驱动信息、预检五项、两个状态寄存器</small></div><span>↗</span></button>
         <button data-action="preflight" class="action" disabled><b>03</b><div><strong>检查采集条件</strong><small>读取 DDR、CL1 时钟与图像格式</small></div><span>↗</span></button>
         <button data-action="capture" class="action capture" disabled><b>04</b><div><strong>采集一帧</strong><small>极速单帧采集 · 保存至板上内存</small></div><span>↗</span></button>
-        <button data-action="fetch_last" class="action" disabled><b>05</b><div><strong>回传最新图像到 D 盘</strong><small>USB 快速传输至 D:\SG3000_Captures</small></div><span>📥</span></button>
+        <button data-action="fetch_last" class="action" disabled><b>05</b><div><strong>回传最新图像到电脑</strong><small>网口已配置走网口（约 1 秒），否则走 USB 串口（约 7 分钟）</small></div><span>📥</span></button>
+        <div class="net-form"><label>电脑 IP<input id="net-pc" placeholder="192.168.1.10" autocomplete="off"></label><label>板子 IP<input id="net-board" placeholder="192.168.1.20（已有可留空）" autocomplete="off"></label><button id="net-setup" disabled>配置网口并测试</button><small id="net-state">网口未配置：回传走 USB 串口。</small></div>
         <div class="action-footer"><button data-action="dmesg" disabled>读取内核日志</button><button data-action="release" disabled>卸载接收驱动</button></div>
       </section>
       <section class="panel observation"><div class="section-title"><h2>当前观察</h2><span id="observed-at">尚无本次实测</span></div>
@@ -62,14 +64,14 @@
           <div><dt>接收程序</dt><dd id="prepared">尚未加载</dd></div>
           <div><dt>本地存储目录</dt><dd id="local-dir" title="D:\SG3000_Captures">D:\SG3000_Captures</dd></div>
         </dl>
-        <div class="inline-note">常规参数说明：相机物理为 16K 线扫，当前在单缆 Base 模式下采集 4096×2000 区域；图像已开启 USB 串口自动回传至 D:\SG3000_Captures。</div>
+        <div class="inline-note">相机物理为 16K 线扫，卡目前报告的宽度是 4096（原因待查，见 verify/V2）。回传的图存到上面「本地存储目录」；网口配置好后走网口，否则走 USB 串口。</div>
       </section>
     </div>
     <section class="panel stream-panel"><div class="section-title"><h2>连续接收与处理 · v0.2</h2><span class="chip amber" id="stream-badge">等待验证</span></div>
-      <div class="stream-form"><label>运行时长<select id="stream-seconds"><option value="30">30 秒</option><option value="60">60 秒</option><option value="300">5 分钟</option><option value="0">直到主动停止</option></select></label><label>处理后端<select id="stream-processor"><option value="stats">CPU 灰度统计 · 调试用途</option><option value="pl">FPGA 接口 · 待硬件与驱动</option></select></label><button data-action="prepare_stream" disabled>加载连续程序</button><button id="start-stream" class="primary" disabled>开始连续接收</button><button id="replay">离线结果回放</button></div>
+      <div class="stream-form"><label>运行时长<select id="stream-seconds"><option value="30">30 秒</option><option value="60">60 秒</option><option value="300">5 分钟</option><option value="0">直到主动停止</option></select></label><label>处理后端<select id="stream-processor"><option value="stats">CPU 灰度统计 · 调试用途</option><option value="candidates">颗粒候选检测 · 第一版</option></select></label><button data-action="prepare_stream" disabled>加载连续程序</button><button id="start-stream" class="primary" disabled>开始连续接收</button><button id="replay">离线结果回放</button></div>
       <div class="stream-metrics"><div><small>已处理图像块</small><strong id="stream-count">—</strong></div><div><small>当前块编号 / 尺寸</small><strong id="stream-block">—</strong></div><div><small>灰度范围 / 均值</small><strong id="stream-gray">—</strong></div><div><small>检测结论</small><strong id="stream-decision">尚无检测算法</strong></div></div>
       <p class="stream-summary" id="stream-summary">接收与处理并行，队列满时停止并报告。灰度统计不作合格／缺陷判定；本次先向中控台输出。</p>
-      <div class="inline-note">使用前先加载基础驱动，并将 <a href="/api/addon" download="sg3000-stream-v0.2.zip">SD 补充包</a> 解压到 SD 根目录，保留原文件。连续模块尚未上板验证。<button class="text-button" data-file="interfaces">接口与部署说明 →</button></div>
+      <div class="inline-note">连续程序在「从 SD 加载程序」时已一起拷贝。选「颗粒候选检测」且网口已配置时，每块的候选坐标存到采集目录的 candidates 子目录。连续模块尚未上板验证。<button class="text-button" data-file="guide">上板步骤 →</button></div>
     </section>
     <section class="panel terminal-panel"><div class="section-title"><div class="terminal-heading"><h2>操作与串口日志</h2><span id="terminal-status">串口未连接</span></div><div class="terminal-tools"><label><input id="autoscroll" type="checkbox" checked> 跟随日志</label><button id="export">导出本次日志</button><button id="interrupt" class="danger" disabled>中断操作</button></div></div><pre id="terminal" tabindex="0" aria-label="串口原始日志"></pre><div class="terminal-foot">日志保存在本机 runtime 文件夹。中断请求不等于 DMA 已停止；以程序返回与日志为准。</div></section>
     <section class="panel image-panel"><div class="section-title"><div><h2>图像查看器</h2><p>本地存储于 D:\SG3000_Captures。采集或回传后自动显示，亦可手动导入。</p></div><div style="display:flex;gap:8px;align-items:center;"><button id="view-latest-btn" style="font-size:12px;" disabled>显示最新采集图</button><label class="file-button">导入 PGM<input id="pgm" type="file" accept=".pgm"></label></div></div><div id="image-empty" class="image-empty"><span>▧</span><p>等待完整图像</p><small id="image-empty-sub">采集成功后图像将自动保存到 D:\SG3000_Captures 并在下方显示。</small></div><canvas id="image" hidden></canvas><div id="image-info" class="image-info"></div><div id="board-frame" class="inline-note" hidden></div></section>

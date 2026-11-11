@@ -7,6 +7,9 @@ import threading
 import time
 import uuid
 import copy
+import ipaddress
+import os
+import sys
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -15,9 +18,29 @@ import serial
 from serial.tools import list_ports
 from telemetry import parse as parse_telemetry
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'receiver'))
+import rx_tcp  # noqa: E402
+
 KERNEL = '5.15.19-xilinx-v2022.1'
 DEVICE = '/sys/bus/pci/devices/0000:01:00.0'
-APP = '/tmp/sg3000-board/sg3000-capture'
+DEV_NODE = '/dev/sg3000_rx_0000:01:00.0'
+BOARD_DIR = '/tmp/sg3000-board'
+BOARD_CAPTURES = '/tmp/sg3000-console'   # 板上存采集图的目录（内存盘，断电即失）
+APP = BOARD_DIR + '/sg3000-capture'
+STREAM_APP = BOARD_DIR + '/sg3000-stream'
+STATUS_APP = BOARD_DIR + '/sg_status'
+APP_VERSION = 'sg3000-capture 1.0 ABI 1'
+STREAM_VERSION = 'sg3000-stream 0.2 ABI 1'
+
+# SD 卡第一个分区上的目录：
+#   glass-capture/          本仓库编译的程序（tools/make_sd_bundle.py 生成）
+#   sg3000-linux-20261023/  旧目录，只从这里取驱动 sg3000_rx.ko（新目录里没有 .ko 时）
+SD_MOUNT = '/mnt/sg3000-console'
+SD_BUNDLE = SD_MOUNT + '/glass-capture'
+SD_LEGACY = SD_MOUNT + '/sg3000-linux-20261023'
+
+NET_PORT = 8770
+CAPTURES = Path(os.environ.get('SG_CAPTURES_DIR') or ('D:/SG3000_Captures' if os.name == 'nt' else Path.home() / 'SG3000_Captures'))
 PROMPT = re.compile(r'(?:^|[\r\n])[^\r\n]{0,140}# ?$')
 
 
@@ -41,14 +64,14 @@ class Console:
         self.identity_ok = False
         self.port_name = ''
         self.job = None
-        captures_dir = Path('D:/SG3000_Captures')
+        captures_dir = CAPTURES
         captures_dir.mkdir(parents=True, exist_ok=True)
         pgms = sorted(captures_dir.glob('*.pgm'), key=lambda p: p.stat().st_mtime, reverse=True)
         if pgms:
             latest = pgms[0]
             self.last_frame = dict(
                 name=latest.name,
-                path=f"/tmp/sg3000-console/{latest.name}",
+                path=f"{BOARD_CAPTURES}/{latest.name}",
                 location='local-pc',
                 local_path=str(latest),
                 size_bytes=latest.stat().st_size,
@@ -62,6 +85,10 @@ class Console:
         self.stream = {}
         self.stream_lines = ''
         self.silent_rx = False
+        self.net = {}                 # 配置好网口后：pc_ip、board_ip、port
+        self.net_frames = deque(maxlen=50)
+        self.net_candidates = 0
+        self.receiver = None
         self.log_path = self.runtime / ('session-' + datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:8] + '.jsonl')
         self.event('system', '中控台已启动。尚未连接设备；历史记录不代表当前状态。')
 
@@ -82,7 +109,7 @@ class Console:
             return copy.deepcopy(dict(connected=self.connected, port=self.port_name, shell_ready=self.shell_ready,
                         identity_ok=self.identity_ok, busy=self.busy, job=self.job,
                         checks=dict(self.checks), last_frame=self.last_frame, seq=self.seq,
-                        stream=dict(self.stream),
+                        stream=dict(self.stream), net=dict(self.net), captures=str(CAPTURES),
                         events=[e for e in self.events if e['seq'] > after]))
 
     def _stream_unknown(self, message):
@@ -252,7 +279,7 @@ class Console:
         return output
 
     def start(self, action, options=None):
-        if action not in {'probe', 'prepare', 'preflight', 'capture', 'fetch_last', 'dmesg', 'release', 'prepare_stream', 'stream', 'replay'}:
+        if action not in {'probe', 'prepare', 'preflight', 'capture', 'fetch_last', 'dmesg', 'release', 'prepare_stream', 'stream', 'replay', 'status', 'network'}:
             raise ValueError('未知操作。')
         with self.lock:
             if action != 'replay' and (not self.connected or not self.shell_ready):
@@ -265,9 +292,11 @@ class Console:
             if not isinstance(options,dict):raise ValueError('操作参数必须是对象。')
             seconds = options.get('seconds', 30)
             processor = options.get('processor', 'stats')
-            if type(seconds) is not int or not 0 <= seconds <= 300 or processor not in {'stats', 'pl'}:
-                raise ValueError('连续时长必须为 0..300 秒，处理后端为 stats 或 pl。')
+            if type(seconds) is not int or not 0 <= seconds <= 300 or processor not in {'stats', 'candidates'}:
+                raise ValueError('连续时长必须为 0..300 秒，处理后端为 stats 或 candidates。')
             self.stream_options = dict(seconds=seconds, processor=processor)
+            if action == 'network':
+                self.net_options = self._check_net_options(options)
             if action in {'stream', 'replay'}:
                 self.stream = {'channel': 'recorded-replay' if action == 'replay' else 'board', 'status': 'starting'}
                 self.stream_lines = ''
@@ -307,51 +336,51 @@ class Console:
         return '板卡身份检查通过。尚未检查相机信号，也未运行 DMA。'
 
     def _prepare(self):
-        # Read-only SD access. Never write boot files or change existing mounts.
-        mount = '/mnt/sg3000-console'
-        src = mount + '/sg3000-linux-20261023'
+        """从 SD 卡只读拷贝本仓库编译的程序到 /tmp，校验版本，加载驱动。不改任何二进制（D003）。"""
         self.run_checked("test \"$(uname -r)\" = '" + KERNEL + "' && test \"$(cat " + DEVICE + "/vendor)\" = 0x4c54 && test \"$(cat " + DEVICE + "/device)\" = 0x3000")
-        self.run_checked(f"mkdir -p {mount}; cd /; umount {mount} 2>/dev/null; umount /mnt/sd* 2>/dev/null; mount -t vfat -o ro /dev/mmcblk0p1 {mount}")
+        self.run_checked(f"mkdir -p {SD_MOUNT}; cd /; umount {SD_MOUNT} 2>/dev/null; umount /mnt/sd* 2>/dev/null; mount -t vfat -o ro /dev/mmcblk0p1 {SD_MOUNT}")
         try:
-            self.run_checked('cd ' + src + ' && sha256sum -c SHA256SUMS && mkdir -p /tmp/sg3000-board /run && cp sg3000_rx.ko sg3000-capture /tmp/sg3000-board/ && chmod 700 ' + APP, 20)
+            rc, _ = self.exchange(f"test -d {SD_BUNDLE}")
+            if rc:
+                raise RuntimeError('SD 卡第一个分区根目录下没有 glass-capture 文件夹。按 docs/BRINGUP.md 第 1 步拷贝。')
+            self.run_checked(f"cd {SD_BUNDLE} && sha256sum -c SHA256SUMS && mkdir -p {BOARD_DIR} /run && "
+                             f"cp sg3000-capture sg3000-stream sg_status {BOARD_DIR}/ && chmod 700 {BOARD_DIR}/sg*", 20)
+            # 驱动：新目录里有就用新目录的（已由 SHA256SUMS 校验），否则用旧目录里校验过的那一份
+            self.run_checked(f"if [ -f {SD_BUNDLE}/sg3000_rx.ko ]; then cp {SD_BUNDLE}/sg3000_rx.ko {BOARD_DIR}/; "
+                             f"else cd {SD_LEGACY} && grep ' sg3000_rx.ko$' SHA256SUMS | sha256sum -c && cp sg3000_rx.ko {BOARD_DIR}/; fi", 20)
         finally:
-            self.run_checked('umount ' + mount, allow_cancel=True)
-        self._apply_board_patch()
-        self.run_checked("if [ -L " + DEVICE + "/driver ]; then test \"$(basename \"$(readlink " + DEVICE + "/driver)\")\" = sg3000_rx; elif [ -d /sys/module/sg3000_rx ]; then echo 'Module exists but card is not bound'; exit 1; else insmod /tmp/sg3000-board/sg3000_rx.ko; fi && test -e /dev/sg3000_rx_0000:01:00.0", 15)
+            self.run_checked('umount ' + SD_MOUNT, allow_cancel=True)
+        for app, expected in ((APP, APP_VERSION), (STREAM_APP, STREAM_VERSION)):
+            out = self.run_checked(app + (' version' if app == APP else ' --version'))
+            if expected not in out:
+                raise RuntimeError(f'{app} 版本不对：期望 {expected}。SD 卡上的程序可能是旧的。')
+        self.run_checked("if [ -L " + DEVICE + "/driver ]; then test \"$(basename \"$(readlink " + DEVICE + "/driver)\")\" = sg3000_rx; elif [ -d /sys/module/sg3000_rx ]; then echo 'Module exists but card is not bound'; exit 1; else insmod " + BOARD_DIR + "/sg3000_rx.ko; fi && test -e " + DEV_NODE, 15)
         self.checks['prepared'] = True
-        return '已从 SD 卡校验并加载接收程序；SD 已卸载。尚未启动采集。'
+        self.checks['stream_prepared'] = True
+        return '已从 SD 卡校验并加载新程序（单帧、连续、体检）和驱动；SD 已卸载。尚未启动采集。'
 
-    def _apply_board_patch(self):
-        patch_cmd = (
-            "dd if=/tmp/sg3000-board/sg3000-capture bs=1 count=5736 of=/tmp/p1 2>/dev/null && "
-            "printf '\\037\\040\\003\\325' > /tmp/p2 && "
-            "dd if=/tmp/sg3000-board/sg3000-capture bs=1 skip=5740 of=/tmp/p3 2>/dev/null && "
-            "cat /tmp/p1 /tmp/p2 /tmp/p3 > /tmp/sg3000-board/sg3000-capture && "
-            "chmod 700 " + APP + " && rm -f /tmp/p1 /tmp/p2 /tmp/p3"
-        )
-        self.run_checked(patch_cmd, 15)
-        self.event('system', '板上内存程序已自动打入 DDR 校准兼容补丁。')
-        try:
-            sd_mount = '/mnt/sd_persist'
-            sd_dir = sd_mount + '/sg3000-linux-20261023'
-            sd_cmd = (
-                f"mkdir -p {sd_mount} && "
-                f"mount -t vfat /dev/mmcblk0p1 {sd_mount} && "
-                f"cp /tmp/sg3000-board/sg3000-capture {sd_dir}/sg3000-capture && "
-                f"cd {sd_dir} && sha256sum sg3000_rx.ko sg3000-capture resume.sh > SHA256SUMS && "
-                f"cd / && sync && umount {sd_mount}"
-            )
-            self.run_checked(sd_cmd, 20)
-            self.event('system', '补丁已成功持久化写入 SD 卡！重新上电均会自动生效。')
-        except Exception as sd_err:
-            self.event('system', f'SD 卡持久化提示（非致命）：{sd_err}')
+    def _status(self):
+        """只读体检：驱动信息、预检五项、两个状态寄存器。不启动采集。"""
+        rc, output = self.exchange(STATUS_APP, 15)
+        self._parse_preflight_status(output)
+        if rc == 2:
+            raise RuntimeError('打不开采集卡设备（驱动没加载，或被别的程序占用）。')
+        if rc == 1:
+            raise RuntimeError('体检完成，但预检没通过。看日志里的 Preflight FAILED 那一行和时钟位。')
+        return '体检通过：驱动正常、预检五项正常。没有启动采集。'
+
+    def _parse_preflight_status(self, output):
+        ddr = re.search(r'DDR status\s+(\d+)', output)
+        clk = re.search(r'pixel clocks\s+0x([0-9a-fA-F]+)', output)
+        if ddr and clk:
+            self.checks['preflight'] = dict(at=datetime.now().isoformat(timespec='seconds'),
+                                            passed='Preflight passed.' in output, known=True,
+                                            ddr=int(ddr.group(1)), clocks=int(clk.group(1), 16),
+                                            config=dict(cl=0, color=0, depth=8) if 'Preflight passed.' in output else None,
+                                            reads_confirmed=True)
 
     def _preflight(self):
         rc, output = self.exchange(APP + ' preflight', 15)
-        if rc != 0 and '(-67)' in output:
-            self.event('system', '检测到 DDR 状态检查需要适配，正在自动应用持久化补丁...')
-            self._apply_board_patch()
-            rc, output = self.exchange(APP + ' preflight', 15)
         self._parse_preflight(output, rc)
         if rc:
             raise RuntimeError('采集条件未满足。请查看信号检查和原始输出；没有启动 DMA。')
@@ -369,7 +398,7 @@ class Console:
                         reads_confirmed=rc == 0 or '(-67)' in output or '(-95)' in output)
         self.checks['preflight'] = data
 
-    def _fetch_file_from_board(self, remote_path, local_dest_dir=Path('D:/SG3000_Captures')):
+    def _fetch_file_from_board(self, remote_path, local_dest_dir=CAPTURES):
         local_dest_dir = Path(local_dest_dir)
         local_dest_dir.mkdir(parents=True, exist_ok=True)
         filename = Path(remote_path).name
@@ -429,20 +458,24 @@ class Console:
         return local_file, len(decompressed), gz_size, width, height
 
     def _fetch_last(self):
-        rc, output = self.exchange("ls -t /tmp/sg3000-console/*.pgm 2>/dev/null | head -n 1", timeout=10)
+        rc, output = self.exchange(f"ls -t {BOARD_CAPTURES}/*.pgm 2>/dev/null | head -n 1", timeout=10)
         lines = [l.strip() for l in output.strip().splitlines() if l.strip()]
         target = lines[-1] if lines else ""
-        if not target or not target.startswith('/tmp/sg3000-console/'):
+        if not target or not target.startswith(BOARD_CAPTURES + '/'):
             rc_sd, output_sd = self.exchange("mkdir -p /mnt/sd && mount -t vfat /dev/mmcblk0p1 /mnt/sd 2>/dev/null; ls -t /mnt/sd/frame-*.pgm 2>/dev/null | head -n 1; umount /mnt/sd 2>/dev/null", timeout=10)
             sd_lines = [l.strip() for l in output_sd.strip().splitlines() if 'frame-' in l and l.endswith('.pgm')]
             if sd_lines:
                 target_sd = sd_lines[-1]
-                self.run_checked(f"mkdir -p /mnt/sd && mount -t vfat /dev/mmcblk0p1 /mnt/sd && cp '{target_sd}' /tmp/sg3000-console/ && umount /mnt/sd", 15)
-                target = f"/tmp/sg3000-console/{Path(target_sd).name}"
+                self.run_checked(f"mkdir -p /mnt/sd && mount -t vfat /dev/mmcblk0p1 /mnt/sd && cp '{target_sd}' {BOARD_CAPTURES}/ && umount /mnt/sd", 15)
+                target = f"{BOARD_CAPTURES}/{Path(target_sd).name}"
             else:
                 raise RuntimeError('板上尚未找到任何已采集的 .pgm 图像。请先点击「04 采集一帧」。')
 
-        local_file, size, gz_size, w, h = self._fetch_file_from_board(target)
+        if self.net:
+            local_file, size, w, h = self._fetch_over_network(target)
+            gz_size = size
+        else:
+            local_file, size, gz_size, w, h = self._fetch_file_from_board(target)
         with self.lock:
             self.last_frame = dict(
                 name=local_file.name,
@@ -455,28 +488,31 @@ class Console:
                 width=w,
                 height=h
             )
-        return f"最新图像已成功回传并保存至 D:\\SG3000_Captures\\{local_file.name}（原始 {size:,} 字节，USB传输 {gz_size:,} 字节）。"
+        via = '网口' if self.net else f'USB 串口（压缩后 {gz_size:,} 字节）'
+        return f"最新图像已回传并保存至 {local_file}（{size:,} 字节，经{via}）。"
 
     def _capture(self):
         self.last_frame = None
         name = 'frame-' + datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:6] + '.pgm'
-        path = '/tmp/sg3000-console/' + name
-        rc, output = self.exchange('mkdir -p /tmp/sg3000-console && ' + APP + ' capture --timeout-ms 10000 --output ' + path, 25)
+        path = BOARD_CAPTURES + '/' + name
+        rc, output = self.exchange('mkdir -p ' + BOARD_CAPTURES + ' && ' + APP + ' capture --timeout-ms 10000 --output ' + path, 25)
         self._parse_preflight(output, rc)
-        if rc or 'Saved complete Mono8 frame:' not in output:
+        saved = re.search(r'Saved complete Mono8 frame: (\d+) x (\d+), (\d+) bytes', output)
+        if rc or not saved:
             raise RuntimeError('未确认生成完整图像。请查看采集和停止日志；不会显示成功预览。')
+        w, h, n = (int(v) for v in saved.groups())
 
         with self.lock:
             self.last_frame = dict(
                 name=name,
                 path=path,
                 location='board-ram',
-                size_bytes=8192017,
+                size_bytes=n,
                 at=datetime.now().isoformat(timespec='seconds'),
-                width=4096,
-                height=2000
+                width=w,
+                height=h
             )
-        return '完整图像采集成功！已存入板载内存：' + path + '（4096 × 2000, 8.19 MB）。点击「05 回传最新图像到 D 盘」即可传输至电脑。'
+        return f'完整图像采集成功！已存入板载内存：{path}（{w} × {h}，{n:,} 字节）。点「回传最新图像」传到电脑。'
 
     def _dmesg(self):
         self.run_checked('dmesg | tail -n 60')
@@ -512,27 +548,132 @@ class Console:
             elif kind == 'ended': self.stream['status'] = 'ended' if all(data[k]==0 for k in ('error','source_error','processing_error','output_error','stop_error')) else 'error'
 
     def _prepare_stream(self):
-        mount = '/mnt/sg3000-console'
-        src = mount + '/sg3000-stream-v0.2'
-        self.run_checked("mkdir -p " + mount + "; if grep -q ' " + mount + " ' /proc/mounts; then exit 1; fi; mount -t vfat -o ro /dev/mmcblk0p1 " + mount)
-        try:
-            self.run_checked('cd ' + src + ' && sha256sum -c SHA256SUMS && mkdir -p /tmp/sg3000-board && cp sg3000-stream /tmp/sg3000-board/ && chmod 700 /tmp/sg3000-board/sg3000-stream', 20)
-        finally:
-            self.run_checked('umount ' + mount, allow_cancel=True)
-        version = self.run_checked('/tmp/sg3000-board/sg3000-stream --version')
-        if 'sg3000-stream 0.2 ABI 1' not in version: raise RuntimeError('连续接收程序版本不匹配。')
+        out = self.run_checked(STREAM_APP + ' --version')
+        if STREAM_VERSION not in out:
+            raise RuntimeError('板上没有连续程序，先执行「从 SD 加载程序」。')
         self.checks['stream_prepared'] = True
-        return '连续接收 v0.2 已加载；它尚未上板验证。原单帧程序保留。'
+        return '连续程序已在板上（「从 SD 加载程序」时一起拷贝的）。'
 
     def _stream(self):
         seconds, processor = self.stream_options['seconds'], self.stream_options['processor']
-        version = self.run_checked('/tmp/sg3000-board/sg3000-stream --version')
-        if 'sg3000-stream 0.2 ABI 1' not in version: raise RuntimeError('先加载 v0.2 连续接收程序。')
-        rc, output = self.exchange('/tmp/sg3000-board/sg3000-stream --source hardware --processor ' + processor + ' --seconds ' + str(seconds) + ' --queue 4 --max-frame-mib 16 --emit-ms 1000', seconds + 40 if seconds else float('inf'))
+        version = self.run_checked(STREAM_APP + ' --version')
+        if STREAM_VERSION not in version: raise RuntimeError('先执行「从 SD 加载程序」。')
+        command = (STREAM_APP + ' --source hardware --processor ' + processor + ' --seconds ' + str(seconds)
+                   + ' --queue 4 --max-frame-mib 16 --emit-ms 1000')
+        if processor == 'candidates':
+            if self.net:
+                self._ensure_receiver()
+                command += f" --tcp {self.net['pc_ip']}:{self.net['port']}"
+                self.event('system', f'候选会经网口存到 {CAPTURES / "candidates"}。')
+            else:
+                self.event('system', '网口未配置：只能看到每块的候选个数，候选坐标不会传回电脑。')
+        rc, output = self.exchange(command, seconds + 40 if seconds else float('inf'))
         ended = self.stream.get('ended', {})
         if rc or self.stream.get('status')!='ended' or any(ended.get(k)!=0 for k in ('error','source_error','processing_error','output_error','stop_error')):
             raise RuntimeError('连续接收未正常结束，请查看停止状态与原始日志。' + output[-300:])
-        return '连续接收已结束，收到 ' + str(ended.get('received', '?')) + ' 块，处理 ' + str(ended.get('processed', '?')) + ' 块。结果见下方；灰度统计不是缺陷判定。'
+        what = '候选检测（第一版算法，未对真值）' if processor == 'candidates' else '灰度统计（不是缺陷判定）'
+        return '连续接收已结束，收到 ' + str(ended.get('received', '?')) + ' 块，处理 ' + str(ended.get('processed', '?')) + ' 块。处理方式：' + what + '。'
+
+    # ==== 网口 ==========================================================
+
+    @staticmethod
+    def _check_net_options(options):
+        pc, board = str(options.get('pc_ip', '')).strip(), str(options.get('board_ip', '')).strip()
+        try:
+            ipaddress.IPv4Address(pc)
+            if board:
+                ipaddress.IPv4Address(board)
+        except ValueError:
+            raise ValueError('IP 地址格式不对，应类似 192.168.1.10。板子 IP 可以留空（板子已有地址时）。')
+        if pc == board:
+            raise ValueError('电脑和板子不能用同一个 IP。')
+        return dict(pc_ip=pc, board_ip=board)
+
+    def _ensure_receiver(self):
+        if self.receiver is not None and self.receiver.running:
+            return
+        layout = rx_tcp.Layout(CAPTURES, CAPTURES / 'candidates', CAPTURES / 'status.jsonl')
+        self.receiver = rx_tcp.Receiver(layout, self._on_net_message, lambda text: self.event('system', text))
+        try:
+            self.receiver.start('0.0.0.0', NET_PORT)
+        except OSError as exc:
+            self.receiver = None
+            raise RuntimeError(f'电脑上 {NET_PORT} 端口打不开（可能被别的程序占用）：{exc}')
+        self.event('system', f'电脑端网口接收已启动，端口 {NET_PORT}，存到 {CAPTURES}。')
+
+    def _on_net_message(self, kind, seq, block_id, text, path):
+        with self.cv:
+            if kind == rx_tcp.TYPE_FRAME:
+                self.net_frames.append(path)
+                self.cv.notify_all()
+            elif kind == rx_tcp.TYPE_CANDIDATES:
+                self.net_candidates += 1
+        if kind == rx_tcp.TYPE_FRAME or (kind == rx_tcp.TYPE_CANDIDATES and not text.startswith('0 candidates')):
+            self.event('net', f'#{seq} 块 {block_id}：{text}')
+
+    def _wait_net_frame(self, before, timeout):
+        deadline = time.monotonic() + timeout
+        with self.cv:
+            while len(self.net_frames) == before or (self.net_frames and self.net_frames[-1] is None):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError('板子说发出去了，但电脑在规定时间内没收到完整的图。')
+                self.cv.wait(min(remaining, 0.2))
+            return self.net_frames[-1]
+
+    def _network(self):
+        """配置板子网口 → 电脑开始监听 → 板子发一张 4×1 的测试图 → 电脑确认收到且内容一致。"""
+        o = self.net_options
+        self.net = {}
+        if APP_VERSION not in self.run_checked(APP + ' version'):
+            raise RuntimeError('先执行「从 SD 加载程序」：网口测试要用新版 sg3000-capture。')
+        self._ensure_receiver()
+        # 板上可能只有 ifconfig（BusyBox），也可能有 ip（iproute2），两种都支持
+        if o['board_ip']:
+            b = o['board_ip']
+            self.run_checked(f"if command -v ip >/dev/null; then ip link set eth0 up && "
+                             f"(ip -4 addr show dev eth0 | grep -q 'inet {b}/' || ip addr add {b}/24 dev eth0); "
+                             f"else ifconfig eth0 {b} netmask 255.255.255.0 up; fi")
+        self.run_checked('if command -v ip >/dev/null; then ip -4 addr show dev eth0; else ifconfig eth0; fi')
+        before = len(self.net_frames)
+        rc, output = self.exchange(f"printf 'P5\\n4 1\\n255\\nABCD' > {BOARD_DIR}/nettest.pgm && "
+                                   f"{APP} send {BOARD_DIR}/nettest.pgm --to {o['pc_ip']}:{NET_PORT}", 20)
+        if rc:
+            raise RuntimeError(f"板子连不上电脑 {o['pc_ip']}:{NET_PORT}。依次检查：网线是否插在板子网口和电脑之间；"
+                               f"电脑网卡 IP 是否是 {o['pc_ip']}、和板子同一网段；Windows 防火墙是否允许 Python 接收连接。"
+                               + output[-300:])
+        path = self._wait_net_frame(before, 5)
+        data = Path(path).read_bytes()
+        Path(path).unlink()
+        if not data.endswith(b'ABCD'):
+            raise RuntimeError('收到的测试图内容不对，网口数据有错。')
+        self.net = dict(o, port=NET_PORT)
+        return f"网口已通：板子 → 电脑 {o['pc_ip']}:{NET_PORT}。之后回传图像、连续候选都走网口。"
+
+    def _fetch_over_network(self, target):
+        before = len(self.net_frames)
+        rc, output = self.exchange(f"{APP} send '{target}' --to {self.net['pc_ip']}:{self.net['port']}", 60)
+        sent = re.search(r'Sent frame: (\d+) x (\d+), (\d+) bytes', output)
+        if rc or not sent:
+            raise RuntimeError('网口发送失败。可以重新做「配置网口」，或清空网口设置后走串口。' + output[-400:])
+        path = Path(self._wait_net_frame(before, 30))
+        final = CAPTURES / Path(target).name
+        if not final.exists():
+            os.replace(path, final)
+            path = final
+        w, h, n = (int(v) for v in sent.groups())
+        self._make_preview(path)
+        self.event('system', f'图像已经网口存入电脑：{path}（{n:,} 字节）')
+        return path, n, w, h
+
+    @staticmethod
+    def _make_preview(pgm_path):
+        try:
+            from PIL import Image
+            img = Image.open(pgm_path)
+            img.convert('L').save(Path(pgm_path).with_name(Path(pgm_path).stem + '_preview.png'))
+        except Exception:
+            pass
 
     def _replay(self):
         path = Path(__file__).resolve().parents[1] / 'evidence' / 'synthetic-stream.jsonl'

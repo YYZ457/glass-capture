@@ -26,7 +26,7 @@ def parse(line, channel):
         if event=='preflight':
             integer(d,'valid_mask',0,31);integer(d,'ddr');integer(d,'clocks');integer(d,'error',-4095,0)
             return d
-        if d['source'] not in ('hardware','synthetic') or d['processor'] not in ('stats','pl'):return None
+        if d['source'] not in ('hardware','synthetic') or d['processor'] not in ('stats','pl','candidates'):return None
         if channel=='board' and d['source']!='hardware':return None
         if channel=='recorded-replay' and d['source']!='synthetic':return None
         if event=='started':

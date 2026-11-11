@@ -137,3 +137,80 @@ int pgm_write(const char *path, const struct sg_capture_frame *frame)
     free(temporary);
     return ret;
 }
+
+/* ==== 读 PGM =========================================================== */
+
+/* 读头里的下一个十进制数，跳过空白和 # 注释。 */
+static int header_number(FILE *f, unsigned long *out)
+{
+    int c = fgetc(f);
+    unsigned long v = 0;
+    int digits = 0;
+
+    for (;;) {
+        while (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+            c = fgetc(f);
+        }
+        if (c != '#') {
+            break;
+        }
+        while (c != '\n' && c != EOF) {
+            c = fgetc(f);
+        }
+    }
+    while (c >= '0' && c <= '9' && digits < 9) {
+        v = v * 10 + (unsigned long)(c - '0');
+        digits++;
+        c = fgetc(f);
+    }
+    /* 数字后面必须正好一个空白字符 */
+    if (!digits || !(c == ' ' || c == '\t' || c == '\r' || c == '\n')) {
+        return -EINVAL;
+    }
+    *out = v;
+    return 0;
+}
+
+int pgm_read(const char *path, struct sg_capture_frame *frame, size_t max_bytes)
+{
+    unsigned long width, height, maxval;
+    FILE *f;
+    int ret = 0;
+
+    if (path == NULL || frame == NULL) {
+        return -EINVAL;
+    }
+    memset(frame, 0, sizeof(*frame));
+    f = fopen(path, "rb");
+    if (f == NULL) {
+        return -errno;
+    }
+    if (fgetc(f) != 'P' || fgetc(f) != '5' ||
+        header_number(f, &width) || header_number(f, &height) || header_number(f, &maxval) ||
+        width == 0 || height == 0 || maxval != 255 ||
+        (uint64_t)width * height > max_bytes) {
+        ret = -EINVAL;
+        goto out;
+    }
+    frame->length = (size_t)width * height;
+    frame->data = malloc(frame->length);
+    if (frame->data == NULL) {
+        ret = -ENOMEM;
+        goto out;
+    }
+    if (fread(frame->data, 1, frame->length, f) != frame->length) {
+        ret = -EINVAL;              /* 文件比头里声明的短 */
+    } else if (fgetc(f) != EOF) {
+        ret = -EINVAL;              /* 文件比头里声明的长 */
+    }
+    frame->width = (uint32_t)width;
+    frame->height = (uint32_t)height;
+    frame->packets = 1;
+
+out:
+    fclose(f);
+    if (ret) {
+        sg_capture_frame_free(frame);
+    }
+    return ret;
+}

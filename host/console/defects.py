@@ -141,9 +141,9 @@ class DefectService:
     def __init__(self, bundle_root, output_root):
         self.bundle_root = Path(bundle_root).resolve()
         self.output_root = Path(output_root).resolve()
-        expected = self.bundle_root / "SG3000Workbench" / "runtime" / "defects"
+        expected = self.bundle_root / "host" / "runtime" / "defects"   # bundle_root = 仓库根目录
         if self.output_root != expected.resolve():
-            raise ValueError("离线输出目录必须为随包 SG3000Workbench/runtime/defects。")
+            raise ValueError("离线输出目录必须为 host/runtime/defects。")
         self.output_root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._runs = {}
@@ -152,7 +152,7 @@ class DefectService:
         self._restore()
 
     def _folder(self, run):
-        folder = (self.bundle_root / "sample_output_16k" if run["provenance"] == "recorded-replay"
+        folder = (self.bundle_root / "host" / "runtime" / "sample_output_16k" if run["provenance"] == "recorded-replay"
                   else self.output_root / run["id"])
         if folder.resolve() != folder:
             raise ValueError("运行目录不能使用符号链接跳转。")
@@ -284,11 +284,11 @@ class DefectService:
 
     def _execute(self, run):
         try:
-            module = self.bundle_root / "linescan_preprocess_v2"
+            module = self.bundle_root / "fpga" / "linescan_preprocess_v2"
             script = module / "examples" / "run_linescan.py"
             library = module / "prebuilt" / "windows-x64" / "linescan_preprocess.dll"
             if not script.is_file() or not library.is_file():
-                raise ValueError("随包原生演示程序或 DLL 缺失。")
+                raise ValueError("缺少预编译库 fpga/linescan_preprocess_v2/prebuilt/windows-x64/linescan_preprocess.dll（不在仓库里，在原始 zip 包中）。")
             options = run["options"]
             command = [sys.executable, "-u", str(script), "--native-library", str(library),
                        "--output-dir", str(self._folder(run)), "--radius", str(options["radius"]),

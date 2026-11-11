@@ -99,19 +99,23 @@ apps ─▶ stream ─▶ processing
 | 文件 | 程序 | 状态 |
 |---|---|---|
 | `sg_status.c` | `sg_status` 只读体检 | 🟡 已写，只能上板验证 |
-| `sg_capture_main.c` | `sg3000-capture` 单帧 | 🟡 已写，上板后与 legacy 逐字节对比 |
-| `sg_stream_main.c` | `sg3000-stream` 连续 | 🟡 已迁移，合成源跑通；硬件源没上板 |
+| `sg_capture_main.c` | `sg3000-capture` 单帧；`send` 经网口发图；`version` | 🟡 已写，上板后与 legacy 逐字节对比 |
+| `sg_stream_main.c` | `sg3000-stream` 连续；`--processor candidates`、`--tcp` | 🟡 已迁移，合成源跑通；硬件源没上板 |
 | `pgm_write` | 原子写 PGM | 🟡 已写，电脑上测试通过 |
 
 ### 其他
 
 | 目录 | 内容 | 状态 |
 |---|---|---|
-| `host/console/`、`host/tests/` | 中控台（Python 网页服务 + 串口通道 + 离线检测）及测试 | ✅ 原样 |
-| `host/receiver/rx_tcp.py` | I6 接收端 | 🟡 已写，和 tx_tcp 对通 |
+| `host/console/`、`host/tests/` | 中控台（Python 网页服务 + 串口通道 + 网口接收 + 离线检测）及测试 | 🟡 已改为部署本仓库程序、去掉二进制补丁、加网口；模拟板子端到端测过 |
+| `host/receiver/rx_tcp.py` | I6 接收端（命令行 + 中控台内置）| 🟡 已写，和 tx_tcp 对通 |
 | `host/detect/candidates.py` | 候选检测 Python 参考（和板上 C 同算法）| 🟡 已写 |
 | `fpga/` | 三个 HLS/RTL 包，原样保留，不细分（D001）| 🟡 |
 | `verify/V1-V4` | 测试图案、行完整性、暗场、真值比对 | 🟡 已写，合成图测过；V1 渐变公式待手册确认 |
+| `board/tests/` | 假卡测试、单元测试（`make -C board test`，x86 和 ARM64 模拟器都过）| 🟡 |
+| `tools/make_sd_bundle.py` | 交叉编译 → `dist/glass-capture/`（拷到 SD 卡）| 🟡 |
+| `dist/glass-capture/` | 编译好的 ARM64 板上程序 + SHA256SUMS | 🟡 没上板 |
+| `docs/BRINGUP.md` | 上板步骤 | — |
 | `platform/` | 启动文件 | ⚠️ 只在 SD 卡上 |
 | `legacy/` | 原始代码，只读，迁移参照 | ✅ 仍可编译 |
 | `docs/vendor/` | 厂家 SDK 头文件、示例源码、同系列相机 XML、外部报告（带核对表）| ✅ 2026-11-07 收入 |

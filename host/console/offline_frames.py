@@ -54,7 +54,7 @@ class FrameService:
 
     def __init__(self, bundle_root, output_root=None):
         self.bundle_root = Path(bundle_root).resolve()
-        expected = self.bundle_root / "SG3000Workbench" / "runtime" / "frames"
+        expected = self.bundle_root / "host" / "runtime" / "frames"   # bundle_root = 仓库根目录
         self.output_root = Path(output_root).resolve() if output_root is not None else expected.resolve()
         if self.output_root != expected.resolve() or expected.resolve() != expected:
             raise ValueError("真实图像离线输出必须位于随包 runtime/frames，不能链接到外部。")
@@ -186,11 +186,11 @@ class FrameService:
 
     def _execute(self, run):
         try:
-            module = self.bundle_root / "linescan_preprocess_v2"
+            module = self.bundle_root / "fpga" / "linescan_preprocess_v2"
             script = Path(__file__).with_name("process_frame.py")
             library = module / "prebuilt" / "windows-x64" / "linescan_preprocess.dll"
             if not script.is_file() or not library.is_file():
-                raise ValueError("随包原生程序或 DLL 缺失。")
+                raise ValueError("缺少预编译库 fpga/linescan_preprocess_v2/prebuilt/windows-x64/linescan_preprocess.dll（不在仓库里，在原始 zip 包中）。可改用 host/detect/candidates.py。")
             _, source, _ = self._input(run["input_id"])
             options = run["options"]
             command = [sys.executable, "-u", str(script), "--module-root", str(module), "--input", str(source),

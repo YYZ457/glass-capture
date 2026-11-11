@@ -1,5 +1,5 @@
 # 构建产物
-board/out/
+board/out*/
 board/driver/output/
 *.o
 *.ko

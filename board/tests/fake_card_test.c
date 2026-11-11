@@ -1,0 +1,233 @@
+/* SPDX-License-Identifier: MIT
+ *
+ * fake_card_test.c —— 假卡测试：用一张"假的回调表"模拟 SG3000 卡（邮箱、块头、DMA），
+ * 不碰硬件地验证 board/capture 和 pgm_write 的逻辑。运行：make -C board test
+ */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include "sg_acq.h"
+#include "sg_mailbox.h"
+#include "sg_block.h"
+#include "sg3000_regs.h"
+#include "pgm_write.h"
+#include "sg_err.h"
+
+#define W 16u
+#define MAXL 8u
+#define PKT 64u            /* 每包字节数；整块 W*MAXL=128 → 2 包 */
+
+struct card {
+    uint32_t tx[8]; unsigned ntx;
+    uint32_t rx[8]; unsigned nrx, rxpos, rx_len_bytes;
+    unsigned ack;
+    int started, stopped, hdr_ready, packets_sent, ack_skip, bad_magic, preload_rx;
+    uint32_t block_id;
+    uint32_t regs_written_bad;
+    unsigned long now;
+    int cancel;
+    int dma_calls;
+};
+static struct card C;
+
+static uint32_t hdr_val(uint32_t off)
+{
+    unsigned p = C.packets_sent;               /* 当前包 0 或 1 */
+    int last = (p == 1);
+    switch (off) {
+    case SG_HDR_WIDTH: return W;
+    case SG_HDR_LINES: return MAXL;
+    case SG_HDR_PIXFMT: return SG_PIXFMT_MONO8;
+    case SG_HDR_ZERO_A: case SG_HDR_ZERO_B: return 0;
+    case SG_HDR_SEQ: return (p + 1) | (last ? 0x80000000u : 0);
+    case SG_HDR_PAYLOAD_LEN: return PKT;
+    case SG_HDR_DEST_OFFSET: return p * PKT;
+    case SG_HDR_SRC_ADDR: return 0x1000u + p * PKT;
+    case SG_HDR_BLOCK_ID: return C.block_id;
+    case SG_HDR_MAGIC: return C.bad_magic ? 0 : SG_HDR_MAGIC_VALUE;
+    case SG_HDR_MAX_LINES: return MAXL;
+    default: return 0;
+    }
+}
+
+static void card_process_mailbox(void)
+{
+    int write = (C.tx[4] == SG_MBX_OP_WRITE);
+    uint32_t addr = C.tx[5], val = 0;
+    C.ack += 1 + C.ack_skip; C.ack_skip = 0;
+    if (write) {
+        if (addr == SG_L_ACQ_START) C.started = 1, C.hdr_ready = 1;
+        if (addr == SG_L_ACQ_STOP) C.stopped = 1;
+    } else switch (addr) {
+        case SG_L_DDR_STATUS: val = 2; break;
+        case SG_L_PIXEL_CLOCKS: val = 0x59; break;
+        case SG_L_CL_CONFIG: val = 0; break;
+        case SG_L_CAMERA_COLOR: val = 0; break;
+        case SG_L_CAMERA_DEPTH: val = 8; break;
+    }
+    memset(C.rx, 0, sizeof(C.rx));
+    C.rx[0] = 0x000055aa; C.rx[1] = 1;
+    C.rx[2] = (write ? 12u : 16u) | (C.ack << 16);
+    C.rx[4] = write ? 0x80030000u : 0x80010000u;
+    C.rx[6] = write ? 0u : 4u;
+    C.rx[7] = val;
+    C.rx_len_bytes = write ? 28 : 32;
+    C.nrx = C.rx_len_bytes / 4; C.rxpos = 0;
+}
+
+static int f_read(void *ctx, uint32_t off, uint32_t *v)
+{
+    (void)ctx;
+    if (off == SG_MBX_RX_OCCUPANCY) { *v = C.nrx - C.rxpos; return 0; }
+    if (off == SG_MBX_TX_ROOM) { *v = 8 - C.ntx; return 0; }
+    if (off == SG_MBX_RX_LEN) { *v = C.rx_len_bytes; return 0; }
+    if (off == SG_MBX_RX_DATA) { *v = C.rx[C.rxpos++]; return 0; }
+    if (off == SG_HDR_READY) { *v = C.hdr_ready; return 0; }
+    if (off == SG_ACQ_STATE) { *v = C.stopped ? SG_ACQ_STATE_STOP : 0; return 0; }
+    if (off >= 0x202008 && off <= 0x20206c) { *v = hdr_val(off); return 0; }
+    if (off == SG_HDR_MAGIC) { *v = hdr_val(off); return 0; }
+    return -EINVAL;
+}
+static int f_write(void *ctx, uint32_t off, uint32_t v)
+{
+    (void)ctx;
+    if (off == SG_MBX_TX_DATA) { C.tx[C.ntx++] = v; return 0; }
+    if (off == SG_MBX_TX_LEN) { card_process_mailbox(); C.ntx = 0; return 0; }
+    if (off == SG_HDR_ACK) { return 0; }
+    if (off == SG_ACQ_ARM) { return v == 2 ? 0 : -EINVAL; }
+    C.regs_written_bad++; return -EINVAL;
+}
+static int f_dma(void *ctx, uint32_t src, void *buf, uint32_t len, uint32_t to)
+{
+    (void)ctx; (void)to;
+    C.dma_calls++;
+    for (uint32_t i = 0; i < len; ++i) ((unsigned char *)buf)[i] = (unsigned char)((src + i) & 0xff);
+    /* 最后一次 DMA 搬完一包，下一包才可见 */
+    if (src + len == 0x1000u + PKT) C.packets_sent = 1;
+    else if (src + len == 0x1000u + 2 * PKT) { C.packets_sent = 0; C.hdr_ready = 0; C.block_id++; }
+    return 0;
+}
+static uint64_t f_now(void *ctx) { (void)ctx; return C.now; }
+static void f_sleep(void *ctx, uint32_t ms) { (void)ctx; C.now += ms; }
+static int f_cancel(void *ctx) { (void)ctx; return C.cancel; }
+
+static int fails;
+#define CHECK(c) do { if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
+
+static void reset(void) { memset(&C, 0, sizeof C); C.block_id = 7; }
+static struct sg_capture_io IO = { NULL, f_read, f_write, f_dma, f_now, f_sleep, f_cancel };
+
+int main(void)
+{
+    struct sg_capture_session s; struct sg_capture_options o; uint32_t v;
+    sg_capture_default_options(&o);
+    CHECK(o.control_timeout_ms == 1000 && o.frame_timeout_ms == 10000 && o.dma_timeout_ms == 1000);
+
+    /* 1. 会话初始化：缺回调 → -EINVAL */
+    struct sg_capture_io bad = IO; bad.dma_read = NULL;
+    CHECK(sg_capture_session_init(&s, &bad) == -EINVAL);
+    bad = IO; bad.cancelled = NULL;
+    CHECK(sg_capture_session_init(&s, &bad) == 0 && sg_session_cancelled(&s) == 0);
+
+    /* 2. 邮箱：连读两次 DDR，值=2，ACK 连续 */
+    reset(); CHECK(sg_capture_session_init(&s, &IO) == 0);
+    CHECK(sg_mbx_read(&s, SG_L_DDR_STATUS, &v, 1000, 0) == 0 && v == 2);
+    CHECK(sg_mbx_read(&s, SG_L_DDR_STATUS, &v, 1000, 0) == 0 && v == 2);
+    CHECK(s.request_id == 2 && s.last_ack == 2 && s.have_ack);
+    /* 请求报文内容 */
+    CHECK(C.tx[0] == 0x000155aa && C.tx[4] == 0x80000000u && C.tx[5] == SG_L_DDR_STATUS && C.tx[6] == 4);
+    /* 白名单 */
+    CHECK(sg_mbx_write(&s, 0x12345678u, 1000, 0) == -EPERM);
+    CHECK(C.ntx == 0 && C.started == 0);
+    /* ACK 不连续 → EPROTO */
+    C.ack_skip = 1; CHECK(sg_mbx_read(&s, SG_L_DDR_STATUS, &v, 1000, 0) == -EPROTO);
+    /* 回复窗口有残留 → EBUSY，且没有往发送窗口写 */
+    reset(); sg_capture_session_init(&s, &IO); C.nrx = 8; C.rxpos = 0;
+    CHECK(sg_mbx_read(&s, SG_L_DDR_STATUS, &v, 1000, 0) == -EBUSY && C.ntx == 0);
+    /* 取消：非 cleanup → ECANCELED；cleanup → 照常 */
+    reset(); sg_capture_session_init(&s, &IO); C.cancel = 1;
+    CHECK(sg_mbx_read(&s, SG_L_DDR_STATUS, &v, 1000, 0) == -ECANCELED);
+    CHECK(sg_mbx_write(&s, SG_L_ACQ_STOP, 1000, 1) == 0 && C.stopped);
+
+    /* 3. 预检 */
+    reset(); sg_capture_session_init(&s, &IO);
+    struct sg_capture_preflight p;
+    CHECK(sg_capture_preflight(&s, 1000, &p) == 0);
+    CHECK(p.ddr_status == 2 && p.pixel_clocks == 0x59 && p.camera_depth == 8 && p.valid_mask == 31);
+    CHECK(sg_capture_preflight(&s, 0, &p) == -EINVAL && sg_capture_preflight(&s, 2001, &p) == -EINVAL);
+
+    /* 4. 块头检查（纯函数） */
+    struct sg_block_header h = { .width = W, .lines = MAXL, .pixfmt = SG_PIXFMT_MONO8, .seq = 1,
+        .payload_len = PKT, .dest_offset = 0, .src_addr = 0x1000, .block_id = 3,
+        .magic = SG_HDR_MAGIC_VALUE, .max_lines = MAXL };
+    CHECK(sg_block_header_check(&h, 1, 0) == 0);
+    CHECK(sg_block_header_check(&h, 2, 0) == -EPROTO);
+    CHECK(sg_block_header_check(&h, 1, 8) == -EPROTO);
+    h.magic = 1; CHECK(sg_block_header_check(&h, 1, 0) == -EPROTO); h.magic = SG_HDR_MAGIC_VALUE;
+    h.lines = MAXL + 1; CHECK(sg_block_header_check(&h, 1, 0) == -EPROTO); h.lines = MAXL;
+    h.pixfmt = 0; CHECK(sg_block_header_check(&h, 1, 0) == -EPROTO);
+
+    /* 5. 单帧：begin+next+end，2 包拼成 16x8 */
+    reset(); sg_capture_session_init(&s, &IO);
+    struct sg_capture_result r;
+    CHECK(sg_capture_once(&s, &o, &r) == 0);
+    CHECK(r.frame.width == W && r.frame.height == MAXL && r.frame.length == W * MAXL);
+    CHECK(r.frame.block_id == 7 && r.frame.packets == 2 && r.stop_error == 0 && r.start_attempted && r.stop_attempted);
+    CHECK(C.started && C.stopped && C.dma_calls == 2 && C.regs_written_bad == 0);
+    int ok = 1; for (size_t i = 0; i < r.frame.length; ++i) ok &= r.frame.data[i] == (unsigned char)(0x1000 + i);
+    CHECK(ok);
+    /* 写 PGM */
+    char dir[] = "/tmp/sg_fake_XXXXXX", path[256];
+    CHECK(mkdtemp(dir) != NULL);
+    snprintf(path, sizeof path, "%s/out.pgm", dir);
+    unlink(path);
+    CHECK(pgm_write(path, &r.frame) == 0);
+    struct stat st; CHECK(stat(path, &st) == 0 && st.st_size == (off_t)(strlen("P5\n16 8\n255\n") + 128));
+    CHECK(pgm_write(path, &r.frame) == -EEXIST);          /* 不覆盖 */
+    CHECK(pgm_write(path, &(struct sg_capture_frame){0}) == -EINVAL);
+    unlink(path); rmdir(dir);
+    sg_capture_frame_free(&r.frame); CHECK(r.frame.data == NULL);
+
+    /* 6. 块头魔数错 → EPROTO，仍执行 STOP，且帧已释放 */
+    reset(); sg_capture_session_init(&s, &IO); C.bad_magic = 1;
+    CHECK(sg_capture_once(&s, &o, &r) == -EPROTO);
+    CHECK(r.stop_attempted && C.stopped && r.frame.data == NULL && r.primary_error == -EPROTO);
+
+    /* 7. 开始前已有块就绪 → EBUSY，且不尝试 START */
+    reset(); sg_capture_session_init(&s, &IO); C.hdr_ready = 1;
+    CHECK(sg_capture_once(&s, &o, &r) == -EBUSY);
+    CHECK(!r.start_attempted && !C.started && !C.stopped);
+
+    /* 8. 超时：块永远不就绪 */
+    reset(); sg_capture_session_init(&s, &IO);
+    struct sg_capture_stream st2; CHECK(sg_stream_begin(&st2, &s, &o) == 0);
+    C.hdr_ready = 0; struct sg_capture_frame fr = {0};
+    CHECK(sg_stream_next(&st2, &fr) == -ETIMEDOUT && st2.failed);
+    CHECK(sg_stream_next(&st2, &fr) == -EINVAL);
+    CHECK(sg_stream_end(&st2) == 0 && C.stopped);
+    CHECK(sg_stream_end(&st2) == 0);                       /* 幂等 */
+
+    /* 9. 连续两块，块号 7、8 连续；再制造不连续 */
+    reset(); sg_capture_session_init(&s, &IO);
+    CHECK(sg_stream_begin(&st2, &s, &o) == 0);
+    CHECK(sg_stream_next(&st2, &fr) == 0); sg_capture_frame_free(&fr);
+    C.hdr_ready = 1;
+    CHECK(sg_stream_next(&st2, &fr) == 0 && fr.block_id == 8 && st2.id_discontinuities == 0); sg_capture_frame_free(&fr);
+    C.hdr_ready = 1; C.block_id = 20;
+    CHECK(sg_stream_next(&st2, &fr) == 0 && st2.last_discontinuity && st2.id_discontinuities == 1); sg_capture_frame_free(&fr);
+    CHECK(st2.blocks == 3);
+    CHECK(sg_stream_end(&st2) == 0);
+
+    /* 10. 容量上限 */
+    reset(); sg_capture_session_init(&s, &IO);
+    struct sg_capture_options small = o; small.max_frame_bytes = 64;
+    CHECK(sg_capture_once(&s, &small, &r) == -EFBIG);
+
+    printf(fails ? "fake card: %d FAILED\n" : "fake card: ALL PASS\n", fails);
+    return fails != 0;
+}

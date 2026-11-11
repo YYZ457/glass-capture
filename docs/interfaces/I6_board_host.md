@@ -22,7 +22,7 @@ TCP，板子主动连电脑（只接受数字 IPv4 地址，板上程序静态�
 | 28 | u32 | 保留 |
 
 - 类型 1 负载：u32 width、u32 height、再接 width×height 字节 Mono8
-- 类型 2 负载：u32 count，再接 count × 32 字节：x0 y0 x1 y1 area peak（u32）、cx cy（f32），逐字段小端写，不直接发结构体内存
+- 类型 2 负载：u32 count、u32 flags（bit0 = 板上截断了，候选比发来的多），再接 count × 32 字节：x0 y0 x1 y1 area peak（u32）、cx cy（f32），逐字段小端写，不直接发结构体内存
 - 类型 3 负载：一行 JSON（不带换行）
 
 序号从 1 开始逐条 +1；接收端发现序号跳、魔数/版本/长度/CRC 不对，就断开这条连接，不跳过坏消息。
