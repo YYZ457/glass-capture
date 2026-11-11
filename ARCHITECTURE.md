@@ -67,32 +67,32 @@ apps ─▶ stream ─▶ processing
 | 文件 | 职责 | 状态 |
 |---|---|---|
 | `sg_processing.h` | 处理器接口 | ✅ 原样 |
-| `sg_view.c` | 输入合法性检查 | ⬜ 待迁移 |
-| `sg_stats.c` | CPU 诊断统计（不是缺陷判定）| ⬜ 待迁移 |
+| `sg_view.c` | 输入合法性检查 | 🟡 已迁移，电脑上测过 |
+| `sg_stats.c` | CPU 诊断统计（不是缺陷判定）| 🟡 已迁移，电脑上测过 |
 | `sg_pl_backend.c` | PL 处理器 | 🟡 暂不迁移（D001）|
-| `sg_candidates` | 颗粒候选检测 | ⬜ 全新 |
+| `sg_candidates` | 颗粒候选检测（第一版算法）| 🟡 已写，和 `host/detect/candidates.py` 输出一致；没对过真值 |
 
 ### board/stream/
 
 | 文件 | 职责 | 状态 |
 |---|---|---|
-| `sg_pipeline` | 采集线程 → 有界队列 → 处理线程 | ⬜ 待迁移（legacy 🟡）|
-| `sg_linecheck` | 块号连续性、累计行数、实际行频 | ⬜ 全新，纯计算 |
+| `sg_pipeline` | 采集线程 → 有界队列 → 处理线程 | 🟡 已迁移，合成数据测过，没上板 |
+| `sg_linecheck` | 块号连续性、累计行数、实际行频 | 🟡 已写，电脑上测过（还没接进程序）|
 
 ### board/camera_ctrl/ — 相机控制（I7）
 
 | 文件 | 职责 | 状态 |
 |---|---|---|
 | `cam_regs.h` | 相机寄存器地址 | 🟡 来自同系列 8K 型号 XML，待 16K 确认 |
-| `cam_serial` | GenCP 读写一个寄存器 | ⬜❓ 缺 Linux 下经卡收发串口的方法 |
-| `cam_config` | 宽度、行频、曝光、触发、测试图案、User Set | ⬜ |
+| `cam_serial` | GenCP 读写一个寄存器 | ⬜❓ 缺 Linux 下经卡收发串口的方法（唯一没法写的）|
+| `cam_config` | 宽度、行频、曝光、触发、测试图案、User Set | 🟡 已写在 cam_serial 之上；地址待 16K XML 核对 |
 
 ### board/transport/
 
 | 文件 | 职责 | 状态 |
 |---|---|---|
-| `tx_jsonl` | 结果写成 `SGJSON` 行到 stdout（经串口给中控台）| ⬜ 待迁移 |
-| `tx_tcp` | 经网口发原图块 / 候选（I6）| ⬜ 全新 |
+| `tx_jsonl` | 结果写成 `SGJSON` 行到 stdout（经串口给中控台）| 🟡 已迁移，输出能被 telemetry.py 解析 |
+| `tx_tcp` | 经网口发原图块 / 候选 / 状态（I6）| 🟡 已写，本机回环和 rx_tcp 对通，SHA256 一致 |
 
 ### board/apps/ — 只做参数解析和组装
 
@@ -100,7 +100,7 @@ apps ─▶ stream ─▶ processing
 |---|---|---|
 | `sg_status.c` | `sg_status` 只读体检 | 🟡 已写，只能上板验证 |
 | `sg_capture_main.c` | `sg3000-capture` 单帧 | 🟡 已写，上板后与 legacy 逐字节对比 |
-| `sg_stream_main.c` | `sg3000-stream` 连续 | ⬜ 待迁移 |
+| `sg_stream_main.c` | `sg3000-stream` 连续 | 🟡 已迁移，合成源跑通；硬件源没上板 |
 | `pgm_write` | 原子写 PGM | 🟡 已写，电脑上测试通过 |
 
 ### 其他
@@ -108,9 +108,10 @@ apps ─▶ stream ─▶ processing
 | 目录 | 内容 | 状态 |
 |---|---|---|
 | `host/console/`、`host/tests/` | 中控台（Python 网页服务 + 串口通道 + 离线检测）及测试 | ✅ 原样 |
-| `host/receiver/rx_tcp.py` | I6 接收端 | ⬜ |
+| `host/receiver/rx_tcp.py` | I6 接收端 | 🟡 已写，和 tx_tcp 对通 |
+| `host/detect/candidates.py` | 候选检测 Python 参考（和板上 C 同算法）| 🟡 已写 |
 | `fpga/` | 三个 HLS/RTL 包，原样保留，不细分（D001）| 🟡 |
-| `verify/V1-V4` | 测试图案、行完整性、暗场、真值比对 | ⬜ |
+| `verify/V1-V4` | 测试图案、行完整性、暗场、真值比对 | 🟡 已写，合成图测过；V1 渐变公式待手册确认 |
 | `platform/` | 启动文件 | ⚠️ 只在 SD 卡上 |
 | `legacy/` | 原始代码，只读，迁移参照 | ✅ 仍可编译 |
 | `docs/vendor/` | 厂家 SDK 头文件、示例源码、同系列相机 XML、外部报告（带核对表）| ✅ 2026-11-07 收入 |

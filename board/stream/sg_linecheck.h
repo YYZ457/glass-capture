@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT
  *
- * sg_linecheck.h —— 连续采集时的行完整性记账。⬜ 全新
+ * sg_linecheck.h —— 连续采集时的行完整性记账。
  *
  * 回答的问题："我收到的行，是不是相机真正拍下的全部行，且顺序正确？"
  * 数据来源：每块的 block_id、height，以及（将来接上编码器后）的物理位置。
@@ -14,8 +14,8 @@
 
 struct sg_linecheck {
     uint64_t blocks, lines, id_jumps;
-    uint32_t last_block_id;
-    uint64_t first_ns, last_ns;     /* 推算平均行频 = lines / (last_ns - first_ns) */
+    uint32_t last_block_id, first_height;
+    uint64_t first_ns, last_ns;     /* 平均行频 = (lines - first_height) / (last_ns - first_ns) */
 };
 
 void sg_linecheck_reset(struct sg_linecheck *c);

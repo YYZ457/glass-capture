@@ -22,4 +22,8 @@ struct tx_jsonl {
 /* 填好一个 sg_result_sink，context 指向 t。 */
 void tx_jsonl_sink(struct tx_jsonl *t, struct sg_result_sink *sink);
 
+/* 把一整行（已带换行）写到 stdout，最多等 timeout_ms。stdout 应已设成非阻塞。
+ * sg_stream_main 的 started/preflight/ended 事件行也用它。 */
+int tx_jsonl_emit(const char *line, uint32_t timeout_ms);
+
 #endif

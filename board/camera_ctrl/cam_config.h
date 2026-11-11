@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT
  *
- * cam_config.h —— 相机的高层配置：用"意思"而不是"命令字符串"来设置相机。⬜❓
+ * cam_config.h —— 相机的高层配置：用"意思"而不是寄存器数字来设置相机。
  * 依赖：cam_serial（发命令）、cam_regs.h（寄存器地址，[参考8K]）。协议见 docs/interfaces/I7。
  * 实现思路：每个字段 = 读写 cam_regs.h 里的一个寄存器（大端 32 位），曝光和行频按 80 MHz 时钟数换算。
  *
@@ -21,8 +21,12 @@ struct cam_settings {
     int test_pattern;          /* 0 = 关；其他值对应相机手册里的图案编号 */
 };
 
+/* 范围检查（纯函数，不碰相机）：0 合法，-EINVAL 不合法。 */
+int cam_settings_check(const struct cam_settings *in);
+
 int cam_get(struct sg_capture_session *s, struct cam_settings *out);
 int cam_set(struct sg_capture_session *s, const struct cam_settings *in);
+/* slot 1..3：保存当前配置到 User Set，并设为上电默认加载。 */
 int cam_save_user_set(struct sg_capture_session *s, unsigned slot);
 
 #endif

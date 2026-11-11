@@ -23,11 +23,11 @@ LIB = $(CAPTURE) $(PROCESSING) $(STREAM) $(CAMERA) $(TRANSPORT) $(COMMON)
 all: $(OUT)/sg_status $(OUT)/sg3000-capture $(OUT)/sg3000-stream
 
 $(OUT)/sg_status: apps/sg_status.c $(LIB) | $(OUT)
-	$(CC) $(CFLAGS) $(INC) -static $^ -o $@
+	$(CC) $(CFLAGS) $(INC) -static $^ -lm -o $@
 $(OUT)/sg3000-capture: apps/sg_capture_main.c $(LIB) | $(OUT)
-	$(CC) $(CFLAGS) $(INC) -static $^ -o $@
+	$(CC) $(CFLAGS) $(INC) -static $^ -lm -o $@
 $(OUT)/sg3000-stream: apps/sg_stream_main.c $(LIB) | $(OUT)
-	$(CC) $(CFLAGS) $(INC) -static -pthread $^ -o $@
+	$(CC) $(CFLAGS) $(INC) -static -pthread $^ -lm -o $@
 $(OUT):
 	mkdir -p $@
 

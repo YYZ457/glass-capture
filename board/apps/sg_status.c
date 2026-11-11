@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT
  *
- * sg_status —— 只读体检程序。⬜ 全新，建议第一个写（零风险：不启动采集、不写任何控制寄存器）。
+ * sg_status —— 只读体检程序（零风险：不启动采集、不写任何控制寄存器）。
  *
  * 用法：sg_status [--device PATH]
  * 输出：

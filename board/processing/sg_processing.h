@@ -5,7 +5,7 @@
  *
  * 状态：✅ 定义原样来自 legacy sg_processing.h，仅把 include 改为 sg_frame.h
  * 实现：sg_view.c（校验）、sg_stats.c（CPU 统计）、sg_pl_backend.c（PL，提议中）、
- *       sg_candidates.c（颗粒候选，待写）
+ *       sg_candidates.c（颗粒候选，接口另见 sg_candidates.h）
  */
 #ifndef SG_PROCESSING_H
 #define SG_PROCESSING_H
