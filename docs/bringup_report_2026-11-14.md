@@ -331,3 +331,32 @@ VisionKit 读"设备 XML"走的就是 GenCP 标准清单表（BRM `0x1D0` → �
 - **A**：接好第二根线 → 卡 `ClConfiguration 4` + `CameraWidth 16384` → 采图。50 kHz 最终方案。
 - **B**：不接第二根线 → 相机 `camera-set ClConfiguration 0`、`DeviceTapGeometry 3`，卡保持 Base/3 Tap，只改宽度 16384 → 采图。10 kHz 够用。
 - 两个都失败时：`FailedStage` / `LastHeader` 三行 + 「02½」全文。
+
+---
+
+## 10. 方案 B 收口：Base 1X3 `16384 × 2000` 采图与停采根因修复（同日）
+
+### 10.1 `SG_ACQ_STATE` 不转 `"STOP"` 根因与修复
+
+- 仅将 `SG_STOP_WAIT_MIN_MS` 设为 `6000`（`a733bff`）在实板上仍会 `-110` 超时：单帧采图或 2 秒流停采发出 `AcquisitionStop`（`0x10601018 = 1`）时，FPGA DDR/块头 FIFO 中仍可能积压未 ACK 块（单帧时 `SG_HDR_READY = 1`，2 秒流后 `SG_HDR_READY = 5`）。
+- 实板对照测试（仅 `sleep 5` 不排空 vs `probe_hdr_drain`）确认：
+  1. `SG_HDR_READY`（`0x20206c`）在值 `> 0` 时具有 **读即弹出（read-to-pop）** 硬件语义，每次读取返回当前余量并将头部 FIFO 弹出 1 项（例如 `7 -> 6 -> ... -> 0`）；为 `0` 时读取无副作用。
+  2. 只要 `SG_HDR_READY != 0`，FPGA 就不会将 `SG_ACQ_STATE`（`0x20209c`）转成 `0x53544f50`（`"STOP"`）；读空后约 **`10 ms`** 即稳定进入 `"STOP"`。
+- `board/capture/sg_acq.c` `stop_capture()` 已修复：发送 `SG_L_ACQ_STOP` 后，在轮询 `SG_ACQ_STATE == SG_ACQ_STATE_STOP` 期间若状态仍非 `"STOP"`，读一次 `SG_HDR_READY` 弹出积压块头（仅当 `ready == 0` 时 `sleep_ms(1)`），并保留 `deadline` 上限防止异常卡死。
+- `board/tests/fake_card_test.c` 新增测试 `#11`–`#14`（覆盖 2.5s 合法延时停流、7s 死等超时、`stop_drain_hdrs = 7` 排空转 `"STOP"`、`SG_HDR_READY` 恒非 0 时受 deadline 限制报 `-ETIMEDOUT`）。
+
+### 10.2 ZCU102 实板验证结果（`ClConfiguration = 0` Base、`DeviceTapGeometry = 3`、`CameraWidth = 16384`）
+
+1. **驱动与卡/相机运行时参数**（`cam_serial = 1`，未写 `UserSetSave`）：
+   - `camera-set ClConfiguration 0`（`3 -> 0`，读回 `0`）、`camera-set DeviceTapGeometry 3`（`3 -> 3`，读回 `3`）
+   - `card-set CameraWidth 16384`（`4096 -> 16384`，读回 `16384`）
+   - `preflight` / `sg_status`：五项全过（`DDRInitialStatus=2`、`CameraLinkPixelClocks=0x00000059`、`CL=0`、`Color=0`、`Depth=8`、`CameraClockMHz=85.00`、`LineRateHz=10000.0`）
+2. **连续单帧 `16384 × 2000` Mono8 实采 + 明暗场景校验**：
+   - 连续两次 `capture --timeout-ms 10000` 及随后一次明暗边界场景实采均成功退出（`exit 0`），停采后 `SG_HDR_READY = 0`、`SG_ACQ_STATE = 0x53544f50 ("STOP")`。
+   - 明暗场景全图校验：`P5 16384 2000 255`，实读 `32,768,000` 字节（`extra_eof=1`），`min=0 max=14 mean=3.6930 std=4.6691 nonzero=13755083`；16 段横向均值由左侧 `0.0` 在 `x ≈ 10159` 跃迁至右侧 `8.8..10.3`，`OR3/OR4/OR8` 全相为 `0x0f`、`1:1` 边缘裁剪区 `c%3` 三路均值一致（左 `0.7129/0.7343/0.6911`、右 `8.5417/8.5745/8.5415`），此前强光测试全相 `0x3f`，确认 3-Tap 对齐正常、无通道错位或拼缝。
+3. **硬件流式采集（`sg3000-stream` 真机通过）**：
+   - `--source hardware --processor stats --seconds 2 --queue 4 --max-frame-mib 48`：`exit 0`
+   - `ended`：`error=0, stop_error=0, received=5, processed=5, bytes=163840000, id_discontinuities=0, queue_full_events=0, elapsed_ms=3102`；停流后 `SG_HDR_READY = 0`、`SG_ACQ_STATE = 0x53544f50 ("STOP")`。
+4. **单元测试与宿主测试**：
+   - ZCU102 板上（`fd302d0` 提交）：`fake_card_test`（`#1–#14`）`ALL PASS`、`unit_test` `ALL PASS`；`driver_whitelist_test` 于 `a733bff` 板上通过（`sg3000_rx.c` 未改）。合并回 `origin/main`（`32e250c`）后已完成全套静态 ARM64 交叉编译（零警告）。
+   - 宿主机：`pytest host/tests/test_console.py -v` `17 passed`（`test_board_sim.py` 需 Linux pty/gcc，在 Windows 上跳过）。

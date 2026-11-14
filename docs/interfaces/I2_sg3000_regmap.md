@@ -104,3 +104,4 @@ XML 里还有 `DeviceReboot`（0x10540018）、`ManualFPGAReload`（0x10540040�
 - [x] 邮箱写白名单按 XML 加 5 个卡参数（驱动白名单不用改：卡参数走邮箱）
 - [ ] 上板：读 `CardParam` 当前值，再按 BRINGUP 第 5½ 节做 16K 宽度实验
 - [ ] 0x10002020 bit3..6 的含义（XML 没定义）
+- [x] `0x20206c` (`SG_HDR_READY`) 停采行为已实测（2026-11-14）：值 `> 0` 时读即弹出 1 条待取块头 FIFO 项；`AcquisitionStop` 后必须将其读清至 `0`，`0x20209c` (`SG_ACQ_STATE`) 才会转入 `"STOP"`（约 10 ms）。

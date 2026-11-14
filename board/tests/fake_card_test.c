@@ -29,7 +29,7 @@ struct card {
     int storage_status;
     uint32_t param_addr[8], param_val[8]; unsigned nparam;   /* 写过的卡参数 */                        /* 读卡存储（地址 < 0x10000000）时回复偏移 16 填非 0 */
     unsigned ack;
-    int started, stopped, hdr_ready, packets_sent, ack_skip, bad_magic, preload_rx;
+    int started, stopped, stop_polls_left, stop_drain_hdrs, stop_hdr_stuck, hdr_ready, packets_sent, ack_skip, bad_magic, preload_rx;
     uint32_t block_id;
     uint32_t regs_written_bad;
     unsigned long now;
@@ -121,8 +121,17 @@ static int f_read(void *ctx, uint32_t off, uint32_t *v)
     if (off == SG_MBX_TX_ROOM) { *v = 8 - C.ntx; return 0; }
     if (off == SG_MBX_RX_LEN) { *v = C.rx_len_bytes; return 0; }
     if (off == SG_MBX_RX_DATA) { *v = C.rx[C.rxpos++]; return 0; }
-    if (off == SG_HDR_READY) { *v = C.hdr_ready; return 0; }
-    if (off == SG_ACQ_STATE) { *v = C.stopped ? SG_ACQ_STATE_STOP : 0; return 0; }
+    if (off == SG_HDR_READY) {
+        if (C.stopped && C.stop_hdr_stuck) { C.now += 1; *v = 1; return 0; }
+        if (C.stopped && C.stop_drain_hdrs > 0) { *v = (uint32_t)C.stop_drain_hdrs--; return 0; }
+        *v = C.hdr_ready;
+        return 0;
+    }
+    if (off == SG_ACQ_STATE) {
+        if (C.stopped && !C.stop_drain_hdrs && C.stop_polls_left > 0) C.stop_polls_left--;
+        *v = (C.stopped && !C.stop_hdr_stuck && !C.stop_drain_hdrs && C.stop_polls_left == 0) ? SG_ACQ_STATE_STOP : 0;
+        return 0;
+    }
     if (off >= 0x202008 && off <= 0x20206c) { *v = hdr_val(off); return 0; }
     if (off == SG_HDR_MAGIC) { *v = hdr_val(off); return 0; }
     return -EINVAL;
@@ -326,6 +335,34 @@ int main(void)
     struct sg_capture_options small = o; small.max_frame_bytes = 64;
     CHECK(sg_capture_once(&s, &small, &r) == -EFBIG);
     CHECK(r.primary_stage && !strcmp(r.primary_stage, "block size limit"));
+
+    /* 11. 高带宽停流：STOP 后等 2.5 秒才转成 "STOP"（超过 control_timeout_ms=1000，低于 6000）→ 仍成功 */
+    reset(); sg_capture_session_init(&s, &IO);
+    C.stop_polls_left = 2500;
+    CHECK(sg_capture_once(&s, &o, &r) == 0);
+    CHECK(r.frame.width == W && r.frame.height == MAXL && r.stop_error == 0);
+    sg_capture_frame_free(&r.frame);
+
+    /* 12. 真正卡死：STOP 后 7 秒仍未停 → 报 -ETIMEDOUT 且定位到 wait SG_ACQ_STATE = STOP */
+    reset(); sg_capture_session_init(&s, &IO);
+    C.stop_polls_left = 7000;
+    CHECK(sg_capture_once(&s, &o, &r) == -ETIMEDOUT);
+    CHECK(r.primary_error == 0 && r.stop_error == -ETIMEDOUT);
+    CHECK(r.stop_stage && !strcmp(r.stop_stage, "wait SG_ACQ_STATE = STOP") && r.frame.data == NULL);
+
+    /* 13. STOP 后 FIFO 里仍有 7 个未取块头，读 SG_HDR_READY 逐个弹出后立即转成 "STOP" */
+    reset(); sg_capture_session_init(&s, &IO);
+    C.stop_drain_hdrs = 7;
+    C.stop_polls_left = 10;
+    CHECK(sg_capture_once(&s, &o, &r) == 0);
+    CHECK(C.stop_drain_hdrs == 0 && r.stop_error == 0 && r.frame.width == W && r.frame.height == MAXL);
+    sg_capture_frame_free(&r.frame);
+
+    /* 14. SG_HDR_READY 永久卡在非 0 时也不能死循环，仍受 deadline 限制报 -ETIMEDOUT */
+    reset(); sg_capture_session_init(&s, &IO);
+    C.stop_hdr_stuck = 1;
+    CHECK(sg_capture_once(&s, &o, &r) == -ETIMEDOUT);
+    CHECK(r.primary_error == 0 && r.stop_error == -ETIMEDOUT && r.frame.data == NULL);
 
     printf(fails ? "fake card: %d FAILED\n" : "fake card: ALL PASS\n", fails);
     return fails != 0;

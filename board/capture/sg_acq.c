@@ -34,11 +34,18 @@
 
 /* ==== 停止 ============================================================= */
 
-/* 发 STOP 命令，然后等 SG_ACQ_STATE 变成 "STOP"。
- * 邮箱写用 cleanup = 1：用户按了 Ctrl+C 也要把 STOP 发完；但等待仍有超时。 */
+/* 发 STOP 命令，排空停采瞬间仍已进入 FIFO 的待读块头，然后等 SG_ACQ_STATE 变成 "STOP"。
+ * 邮箱写用 cleanup = 1 与 control_timeout_ms（1..2 秒）：用户按了 Ctrl+C 也要把 STOP 发完。
+ * 2026-11-14 ZCU102 实测 16384×2000 @ 10 kHz：stop 发出时未 ACK 的块仍留在 SG_HDR_READY
+ * （0x20206c）FIFO 里，且该 FIFO 为"读即弹出"；必须先读到 SG_HDR_READY == 0，FPGA 才会在约
+ * 10 ms 后把 SG_ACQ_STATE 转成 "STOP"（否则死等也不转）。保留 SG_STOP_WAIT_MIN_MS（6 秒）
+ * 作为突发积压时的等待上限。 */
+#define SG_STOP_WAIT_MIN_MS 6000u
+
 static int stop_capture(struct sg_capture_session *s, uint32_t timeout_ms)
 {
-    uint32_t state;
+    uint32_t ready, state;
+    uint32_t wait_ms = timeout_ms < SG_STOP_WAIT_MIN_MS ? SG_STOP_WAIT_MIN_MS : timeout_ms;
     uint64_t deadline;
     int ret;
 
@@ -49,7 +56,7 @@ static int stop_capture(struct sg_capture_session *s, uint32_t timeout_ms)
     }
 
     s->stage = "wait SG_ACQ_STATE = STOP";
-    deadline = s->io.now_ms(s->io.context) + timeout_ms;
+    deadline = s->io.now_ms(s->io.context) + wait_ms;
     for (;;) {
         if (s->io.now_ms(s->io.context) >= deadline) {
             return -ETIMEDOUT;
@@ -61,7 +68,13 @@ static int stop_capture(struct sg_capture_session *s, uint32_t timeout_ms)
         if (state == SG_ACQ_STATE_STOP) {
             return 0;
         }
-        s->io.sleep_ms(s->io.context, 1);
+        ret = sg_session_rd(s, SG_HDR_READY, &ready);
+        if (ret) {
+            return ret;
+        }
+        if (ready == 0) {
+            s->io.sleep_ms(s->io.context, 1);
+        }
     }
 }
 

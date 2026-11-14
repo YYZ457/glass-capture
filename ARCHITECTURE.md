@@ -101,8 +101,8 @@ apps ─▶ stream ─▶ processing
 | 文件 | 程序 | 状态 |
 |---|---|---|
 | `sg_status.c` | `sg_status` 只读体检；`--card-xml DIR` 读卡 XML | ✅ 实机体检与 `--card-xml` 读出均通过 |
-| `sg_capture_main.c` | `sg3000-capture` 单帧；`send` 经网口发图；`card-set` 写卡参数（白名单 + 读回）；`camera-probe` / `camera-xml` / `camera-regs` / `camera-read`（只读）；失败时打印 `FailedStage` / `LastHeader`；`version` | ✅ `preflight` / `capture`（4096×2000）/ `version` / `card-set` / `camera-probe`（port0）实机已跑；16384 宽度下 `capture` 约 2s `-110`（疑 CL 模式不对，见 BRINGUP 5¾）；`camera-xml` 等待测 |
-| `sg_stream_main.c` | `sg3000-stream` 连续；`--processor candidates`、`--tcp` | 🟡 已迁移，合成源跑通；硬件源没上板 |
+| `sg_capture_main.c` | `sg3000-capture` 单帧；`send` 经网口发图；`card-set` / `camera-set`（白名单 + 读回）；`camera-probe` / `camera-xml` / `camera-regs` / `camera-read`（只读）；失败时打印 `FailedStage` / `LastHeader`；`version` | ✅ `preflight` / `capture`（4096×2000 及 Base 1X3 `16384×2000`）/ `version` / `card-set` / `camera-set` / `camera-probe`（port0）实机全部通过 |
+| `sg_stream_main.c` | `sg3000-stream` 连续；`--processor candidates`、`--tcp` | ✅ 合成源与真机 `--source hardware --processor stats`（`16384×2000`，`stop_error=0`）均实机通过 |
 | `pgm_write` | 原子写 PGM | 🟡 已写，电脑上测试通过 |
 
 ### 其他
@@ -116,7 +116,7 @@ apps ─▶ stream ─▶ processing
 | `verify/V1-V4` | 测试图案、行完整性、暗场、真值比对 | 🟡 已写，合成图测过；V1 渐变公式待手册确认 |
 | `board/tests/` | 假卡测试、单元测试（`make -C board test`，x86 和 ARM64 模拟器都过）| 🟡 |
 | `tools/make_sd_bundle.py` | 交叉编译 → `dist/glass-capture/`（拷到 SD 卡）| 🟡 |
-| `dist/glass-capture/` | 编译好的 ARM64 板上程序 + SHA256SUMS | ✅ 已上板校验并运行（`00d0718`） |
+| `dist/glass-capture/` | 编译好的 ARM64 板上程序 + SHA256SUMS | ✅ 已上板校验并运行 |
 | `docs/BRINGUP.md` | 上板步骤 | — |
 | `platform/` | 启动文件 | ⚠️ 只在 SD 卡上 |
 | `legacy/` | 原始代码，只读，迁移参照 | ✅ 仍可编译 |
