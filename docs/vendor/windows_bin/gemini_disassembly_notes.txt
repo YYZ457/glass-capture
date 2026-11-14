@@ -1,0 +1,62 @@
+SG3000 / SF6200 / VisionKit Windows Binary Analysis Notes (Verified Disassembly)
+Generated: 2026-11-14
+Targets:
+  - D:\VisionKit\capture\start\SGDriver\Win10\XDMA.sys (SHA256 prefix 9C77C3C7A06B; XDMA.pdb present in same dir)
+  - D:\VisionKit\capture\start\SGDriver\VirSerial\virtualserial.dll (SHA256 prefix 76A67AB4FB25)
+  - D:\VisionKit\capture\start\CameraDll\DeviceTypeCLCard\LusterGraber.dll (SHA256 prefix 46CE7384016C)
+  - D:\VisionKit\runtime\win64\C\VisionKitApi.dll (SHA256 prefix CF80C23103DE)
+
+1. XDMA.sys (Custom -SFMAGIC Xilinx XDMA driver, imagebase 0x140000000)
+   - Device table @ 0x1400071d0 (42 entries, UTF-16LE device suffixes):
+     * dev_type=0..5: standard \user, \control, \event_0..15, \bypass, \h2c_0..3, \c2h_0..3
+     * dev_type=6: \data_0..3 (ch_idx=0..3)   -> Camera Link UART / serial data channels
+     * dev_type=7: \frame_0..3
+     * dev_type=8: \info_0..3               -> EvtIoRead @ 0x140001cbf copies 0x5c bytes from 0x202008..0x20209c
+     * dev_type=9: \grabber_0               -> Card logic register / Flash mailbox
+     * dev_type=10: \stop_0..1              -> EvtIoRead @ 0x140001bae reads 0x20209c
+   - Baudrate IOCTL 0x220024 on \data_0..3 (EvtIoDeviceControl @ 0x140003030..0x140003265):
+     * Compiler subtracts base IOCTL: 0x140003057: sub r8d, 0x220020; 0x140003064: cmp r8d, 4 (hence 0x220024).
+     * Allowed baudrates @ 0x1400030c2..0x140003102: 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600.
+     * Clock & 16550 divisor @ 0x14000310d..0x140003122:
+         divisor = ((baud * 16) / 2 + 200000000) / (baud * 16)   [0xbebc200 = 200 MHz]
+     * Register writes @ 0x140003150..0x14000325e:
+         Writes DLAB (bit7) to (((ch >> 1) << 16) + bar) + 0x100c,
+         divisor>>8 to +0x1004, divisor&0xff to +0x1000, clears DLAB on +0x100c,
+         then writes 0x4000000 to bar + 0x411004 + (ch >> 1) * 0x2000.
+         (Note for Linux whitelist: verify whether `bar` in 0x140003150 is BAR0 or another BAR.)
+   - Serial TX on \data_0..3 @ 0x140003b50..0x140003cba:
+     * Uses BAR0 base + (ch >> 1) * 0x2000 (0x4110xx for ch=0/1; 0x4130xx for ch=2/3).
+     * Prepends 16-byte header to user payload:
+         Word0 (+0):  0x000155aa (u16[0]=0x55aa, u16[1]=1)
+         Word1 (+4):  0x10 if (ch>>1)==0 else 0x12
+         Word2 (+8):  payload_len | (seq << 16)
+         Word3 (+12): 0
+     * Writes 4 header DWORDs + payload DWORDs to 0x411010 + (ch>>1)*0x2000,
+       then writes (payload_len + 16) to 0x411014 + (ch>>1)*0x2000.
+   - Serial RX on \data_0..3 @ 0x140003540..0x140003810 (and status check @ 0x140003307..0x140003360):
+     * Polls 0x41101c + (ch>>1)*0x2000 != 0, reads total_len from 0x411024 + (ch>>1)*0x2000,
+       pops 16-byte header + payload from 0x411020 + (ch>>1)*0x2000.
+   - Grabber mailbox TX/RX on \grabber_0:
+     * TX @ 0x140003e20..0x140003e9c uses 0x412010 / 0x412014 (user payload directly).
+     * RX @ 0x140003820..0x140003a94 uses 0x41201c / 0x412020 / 0x412024 (checks 0x55aa).
+
+2. virtualserial.dll (UMDF 1.11 driver, imagebase 0x180000000)
+   - Device capability check @ 0x180005b08: reads logical address 0x10540010, compares byte == 0x31 ('1').
+   - OpenHandles @ 0x180008b8c..0x180008d87:
+     * Opens \data_0 (or \data_2) into [rbx+0xf0]; ThreadReadXdma @ 0x18000ab83 calls ReadFile on [rdi+0xf0].
+     * Opens \data_1 (or \data_3) into [rbx+0xf8]; IOCTL_SERIAL_SET_BAUD_RATE @ 0x1800092f4 sends 0x220024 with raw 4-byte baudrate to [rsi+0xf8]; OnWrite @ 0x18000a833 writes via [rsi+0xd8].
+   - Clarification on constants 50 / 250 / 260 / 3 @ 0x1800092a9..0x1800092d5:
+     * NOT FPGA baud divisors. Stored into [rsi+0x260] / [rsi+0x264] and passed to WaitForSingleObject([rsi+0x250], dwMilliseconds) in IOCTL_SERIAL_GET_COMMSTATUS @ 0x180009f75..0x180009fa4.
+
+3. LusterGraber.dll (imagebase 0x180000000)
+   - Full .text scan for 0x10xxxxxx constants yields ONLY:
+     * 0x10325476 (MD5 init H3 @ 0x180008880)
+     * 0x10540010 (EnumCameraName @ 0x18000a1f0: reads 4 bytes, checks al == 0x31)
+   - ReadXmlFile @ 0x180007dca..0x180007e55 and LusterGraberCard::ReadXmlFile @ 0x18000aa70:
+     * URL type "File" loads local "SGCard.xml".
+     * URL type "Local" splits "Local:...;<hex_addr>;<hex_len>" via 0x180008310 and reads card storage via 0x18000c670 -> SGCardCmdHelper::ReadData (packet 0x80000000, ACK 0x8001; WriteData uses 0x80020000, ACK 0x8003).
+     * SGCardCtrlDevice opens \grabber_0 (@ 0x18000d7ab).
+
+4. VisionKitApi.dll / Serial Stack
+   - Uses EMVA GenCP (preamble 0x0100, GenCPCamera / GenCPCardCom) over virtualserial / xSerial.dll / clsercom.dll.
+   - Zero hits across D:\VisionKit\capture\start and D:\VisionKit\runtime for: CameraWidth, Local:SGCard, 0x10540024, 0x10601004, 0x10601014, SBDRT, Unknown Command.
