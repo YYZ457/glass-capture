@@ -283,7 +283,7 @@ class Console:
         return output
 
     def start(self, action, options=None):
-        if action not in {'probe', 'prepare', 'preflight', 'capture', 'fetch_last', 'dmesg', 'release', 'prepare_stream', 'stream', 'replay', 'status', 'network', 'card_xml', 'card_set', 'camera_probe', 'camera_xml', 'camera_regs'}:
+        if action not in {'probe', 'prepare', 'preflight', 'capture', 'fetch_last', 'dmesg', 'release', 'prepare_stream', 'stream', 'replay', 'status', 'network', 'card_xml', 'card_set', 'camera_probe', 'camera_xml', 'camera_regs', 'camera_set'}:
             raise ValueError('未知操作。')
         with self.lock:
             if action != 'replay' and (not self.connected or not self.shell_ready):
@@ -303,6 +303,8 @@ class Console:
                 self.net_options = self._check_net_options(options)
             if action == 'card_set':
                 self.card_set_options = self._check_card_set(options)
+            if action == 'camera_set':
+                self.camera_set_options = self._check_camera_set(options)
             if action in {'stream', 'replay'}:
                 self.stream = {'channel': 'recorded-replay' if action == 'replay' else 'board', 'status': 'starting'}
                 self.stream_lines = ''
@@ -372,6 +374,9 @@ class Console:
         if rc == 2:
             raise RuntimeError('打不开采集卡设备（驱动没加载，或被别的程序占用）。')
         if rc == 1:
+            if 'BOTH Camera Link cables' in output:
+                raise RuntimeError('预检没通过：采集卡设成了 EightyBit（双线），但第 2、3 路像素时钟没有——第二根 Camera Link 线没接上或没信号。'
+                                   '接好第二根线；或者走 B 方案（相机和卡都切 Base 3 Tap，见 BRINGUP 第 5¾ 节）。')
             raise RuntimeError('体检完成，但预检没通过。看日志里的 Preflight FAILED 那一行和时钟位。')
         return '体检通过：驱动正常、预检五项正常。没有启动采集。'
 
@@ -474,17 +479,21 @@ class Console:
     def _parse_preflight_status(self, output):
         ddr = re.search(r'DDR status\s+(\d+)', output)
         clk = re.search(r'pixel clocks\s+0x([0-9a-fA-F]+)', output)
+        cl = re.search(r'CL config\s+(\d+)', output)
         if ddr and clk:
             self.checks['preflight'] = dict(at=datetime.now().isoformat(timespec='seconds'),
                                             passed='Preflight passed.' in output, known=True,
                                             ddr=int(ddr.group(1)), clocks=int(clk.group(1), 16),
-                                            config=dict(cl=0, color=0, depth=8) if 'Preflight passed.' in output else None,
+                                            config=dict(cl=int(cl.group(1)) if cl else 0, color=0, depth=8)
+                                            if 'Preflight passed.' in output else None,
                                             reads_confirmed=True)
 
     def _preflight(self):
         rc, output = self.exchange(APP + ' preflight', 15)
         self._parse_preflight(output, rc)
         if rc:
+            if 'BOTH Camera Link cables' in output:
+                raise RuntimeError('采集条件未满足：EightyBit 需要两根 Camera Link 线，第 2、3 路像素时钟没有。没有启动 DMA。')
             raise RuntimeError('采集条件未满足。请查看信号检查和原始输出；没有启动 DMA。')
         return '采集前检查通过。尚未启动 DMA，不能据此认定能采到图像。'
 
@@ -701,6 +710,32 @@ class Console:
             raise RuntimeError('卡参数没写成：' + output[-400:])
         old, _, back = (int(x) for x in done.groups()[1:])
         return f"采集卡 {o['name']}：{old} → {back}（已读回确认）。重新「04 采集一帧」看效果；断电后恢复默认。"
+
+    # 和板上 camera_set_allowed() 一致（地址来自这台 16K 相机自己的 XML）。Tap 只在相机为 Base 时可改，板上再查一次。
+    CAMERA_SET_RANGES = {'ClConfiguration': (0, 3), 'DeviceTapGeometry': (2, 3)}
+
+    @classmethod
+    def _check_camera_set(cls, options):
+        name, value = options.get('name'), options.get('value')
+        if name not in cls.CAMERA_SET_RANGES or type(value) is not int or value not in cls.CAMERA_SET_RANGES[name]:
+            raise ValueError('相机只允许改 ClConfiguration（0 Base / 3 EightyBit）和 DeviceTapGeometry（2 / 3，仅 Base 时）。')
+        return dict(name=name, value=value)
+
+    def _camera_set(self):
+        """写相机的 Camera Link 输出模式（不保存，相机断电恢复）。写后读回核对。"""
+        o = self.camera_set_options
+        self._ensure_cam_serial()
+        rc, output = self.exchange(f"{APP} camera-set {o['name']} {o['value']} 2>&1", 30)
+        done = re.search(r'CameraSet (\w+) 0x[0-9a-f]+: (\d+) -> (\d+), readback (\d+)', output)
+        if rc or not done:
+            raise RuntimeError('相机参数没写成：' + output[-400:])
+        state = re.search(r'CameraState ClConfiguration=(\d+).*?DeviceTapGeometry=(\d+)', output)
+        old, _, back = (int(x) for x in done.groups()[1:])
+        mode = {0: 'Base', 3: 'EightyBit'}
+        now = (f"相机现在 ClConfiguration={state.group(1)}（{mode.get(int(state.group(1)), '?')}）、"
+               f"DeviceTapGeometry={state.group(2)}。") if state else ''
+        return (f"相机 {o['name']}：{old} → {back}（已读回确认）。" + now +
+                '采集卡要改成同样的模式（见 BRINGUP 第 5¾ 节）；相机断电后恢复 EightyBit。')
 
     @staticmethod
     def _check_net_options(options):

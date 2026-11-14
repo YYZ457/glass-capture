@@ -95,11 +95,20 @@ static void print_preflight(const struct sg_capture_preflight *p, int ret)
            p->ddr_status);
     printf("pixel clocks    0x%08x   bits set: ", p->pixel_clocks);
     print_set_bits(p->pixel_clocks);
-    puts("   (bit0 = Camera Link clock 1; other bits unknown)");
-    printf("CL config       %u   (0 = Base)\n", p->cl_configuration);
+    puts("   (card XML: bit0..2 = pixel clock 1..3; clocks 2 and 3 come on the 2nd Camera Link cable)");
+    printf("CL config       %u   (0 = Base, 1 cable / 4 = EightyBit, 2 cables / 1, 2 unsupported)\n",
+           p->cl_configuration);
     printf("camera color    %u   (0 = mono)\n", p->camera_color);
     printf("camera depth    %u   (8 expected)\n", p->camera_depth);
 
+    if (p->valid_mask == 31 && sg_preflight_required_clocks(p->cl_configuration) &&
+        sg_preflight_missing_clocks(p)) {
+        printf("missing clocks  ");
+        print_set_bits(sg_preflight_missing_clocks(p));
+        puts(p->cl_configuration == SG_CL_EIGHTY_BIT && !(sg_preflight_missing_clocks(p) & 1u)
+             ? "   (EightyBit needs BOTH Camera Link cables: is the 2nd cable plugged in at camera and card?)"
+             : "   (no clock on the 1st Camera Link cable: camera off or cable unplugged?)");
+    }
     if (ret) {
         printf("Preflight FAILED: %s (%d)\n", strerror(-ret), ret);
     } else {
@@ -160,7 +169,8 @@ static const struct card_param CARD_PARAMS[] = {
     { "FrameLengthMethod", SG_L_FRAME_LENGTH_METHOD, "0 Fix / 1 Variable" },
     { "DvalMode",          SG_L_DVAL_MODE,          "" },
     { "FvalMode",          SG_L_FVAL_MODE,          "" },
-    { "CLChipStatus",      SG_L_CL_CHIP_STATUS,     "bit0..3" },
+    { "CLChipStatus",      SG_L_CL_CHIP_STATUS,     "bit0 all chips needed by ClConfiguration OK, bit1..3 chip1..3 OK" },
+    { "CLAutoLink",        SG_L_CL_AUTO_LINK,       "0 Disable / 1 Enable (read-only here)" },
     { "CLFvalLval",        SG_L_CL_FVAL_LVAL,       "bit0..2 Fval1..3, bit3..5 Lval1..3" },
     { "LineTriggerEnable", SG_L_LINE_TRIGGER_EN,    "" },
     { "LineTriggerSource", SG_L_LINE_TRIGGER_SRC,   "0 Internal / 1 Software / 2.. Line0.." },

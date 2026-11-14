@@ -107,7 +107,7 @@
 /* ===== C. 逻辑地址（只能经邮箱访问）================================= */
 #define SG_L_CAMERA_ENUM         0x10540010u  /* [逆向] 低字节 '1'(0x31) 时 VisionKit 认为卡有 2 路，否则 1 路。只读 */
 #define SG_L_DDR_STATUS          0x10540024u  /* [厂家] DDRInitialStatus；0 未初始化 / 2 已校准；实测 2 */
-#define SG_L_PIXEL_CLOCKS        0x10002020u  /* [厂家] bit0..2 = CameraLinkPixelClock1..3；实测 0x59 / 0x19，bit3+ XML 未定义 */
+#define SG_L_PIXEL_CLOCKS        0x10002020u  /* [厂家] bit0..2 = CameraLinkPixelClock1..3；实测 0x59 / 0x19（第 2、3 路始终 0：第二根线无时钟），bit3+ XML 未定义 */
 #define SG_L_CL_CONFIG           0x10601004u  /* [厂家] ClConfiguration：Base 0 / Medium 1 / Full 2 / EightyBit 4；实测 0 */
 #define SG_L_CAMERA_COLOR        0x10601008u  /* [厂家] CameraColorType：Mono 0；实测 0 */
 #define SG_L_CAMERA_DEPTH        0x1060100cu  /* [厂家] CameraPixelDepth：8/10/12/14/16；实测 8 */
@@ -128,7 +128,9 @@
 #define SG_L_OUT_HEIGHT          0x10202044u  /* Height（RO）输出图高 */
 #define SG_L_DVAL_MODE           0x10002018u  /* DvalMode */
 #define SG_L_FVAL_MODE           0x1000201cu  /* FvalMode */
-#define SG_L_CL_CHIP_STATUS      0x10002038u  /* bit0..3 = CameraLinkChip/Chip1..3Status（RO）*/
+#define SG_L_CL_CHIP_STATUS      0x10002038u  /* [厂家] bit0 = CameraLinkChipStatus（本配置要的芯片都好），bit1..3 = Chip1..3Status（RO）。
+                                                * 实测 Base 3（芯片1好），EightyBit 2（总状态失败：芯片2/3 无信号）*/
+#define SG_L_CL_AUTO_LINK        0x10002034u  /* [厂家] CameraLinkAutoLink 0 Disable / 1 Enable（RW，本仓库只读）*/
 #define SG_L_CL_FVAL_LVAL        0x10002028u  /* bit0..2 = Fval1..3，bit3..5 = Lval1..3（RO）*/
 #define SG_L_LINE_TRIGGER_EN     0x10102040u  /* LineTriggerEnable / LineTriggerMode：0 / 1 */
 #define SG_L_LINE_TRIGGER_SRC    0x10102044u  /* LineTriggerSource：Internal 0 / Software 1 / Line0.. 2.. */

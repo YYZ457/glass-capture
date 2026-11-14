@@ -10,6 +10,7 @@
  * 怎么验证：
  *   1. 正常接线：返回 0，五项值与上面头文件里的实测值一致
  *   2. 拔掉 Camera Link 线：应返回 -ENOLINK
+ *   3. EightyBit 只接一根线：第 2、3 路时钟没有 → -ENOLINK（2026-11-14 实板就是这样）
  */
 #include <string.h>
 
@@ -17,6 +18,20 @@
 #include "sg_mailbox.h"
 #include "sg3000_regs.h"
 #include "sg_err.h"
+
+uint32_t sg_preflight_required_clocks(uint32_t cl_configuration)
+{
+    switch (cl_configuration) {
+    case SG_CL_BASE:       return 0x1u;   /* 一根线、一颗芯片 */
+    case SG_CL_EIGHTY_BIT: return 0x7u;   /* 两根线、三颗芯片（X 在第一根，Y、Z 在第二根）*/
+    default:               return 0;      /* Medium / Full：本项目的相机不用，不支持 */
+    }
+}
+
+uint32_t sg_preflight_missing_clocks(const struct sg_capture_preflight *p)
+{
+    return sg_preflight_required_clocks(p->cl_configuration) & ~p->pixel_clocks;
+}
 
 int sg_capture_preflight(struct sg_capture_session *s, uint32_t timeout_ms,
                          struct sg_capture_preflight *p)
@@ -45,14 +60,7 @@ int sg_capture_preflight(struct sg_capture_session *s, uint32_t timeout_ms,
     }
     p->valid_mask |= 2u;
 
-    /* 先判断前两项。DDR 状态 0（未初始化）或 2（已校准）都算正常；
-     * 时钟的 bit0 必须为 1（port 0 对应的链路有信号）。 */
-    if ((p->ddr_status != 0 && p->ddr_status != 2) ||
-        !(p->pixel_clocks & 1u)) {
-        return -ENOLINK;
-    }
-
-    /* ③ Camera Link 配置（0 = Base） */
+    /* ③ Camera Link 配置（卡 XML：0 Base / 1 Medium / 2 Full / 4 EightyBit） */
     ret = sg_mbx_read(s, SG_L_CL_CONFIG, &p->cl_configuration, timeout_ms, 0);
     if (ret) {
         return ret;
@@ -73,9 +81,20 @@ int sg_capture_preflight(struct sg_capture_session *s, uint32_t timeout_ms,
     }
     p->valid_mask |= 16u;
 
-    /* 只支持 Base、黑白、8 位。 */
-    if (p->cl_configuration != 0 || p->camera_color != 0 || p->camera_depth != 8u) {
+    /* 五项都读完再判断（以前先判时钟就返回，后三项是 0，打印出来会误导）。
+     * DDR 状态 0（未初始化）或 2（已校准）都算正常。 */
+    if (p->ddr_status != 0 && p->ddr_status != 2) {
+        return -ENOLINK;
+    }
+    /* 只支持 Base 或 EightyBit（10 Tap）、黑白、8 位。 */
+    if (sg_preflight_required_clocks(p->cl_configuration) == 0 ||
+        p->camera_color != 0 || p->camera_depth != 8u) {
         return -ENOTSUP;
+    }
+    /* 这种配置要用到的每一路像素时钟都必须锁定（卡 XML：bit0..2 = PixelClock1..3）。
+     * EightyBit 要两根线：第 2、3 路时钟在第二根 Camera Link 线上。 */
+    if (sg_preflight_missing_clocks(p) != 0) {
+        return -ENOLINK;
     }
     return 0;
 }

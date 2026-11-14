@@ -301,3 +301,33 @@ VisionKit 读"设备 XML"走的就是 GenCP 标准清单表（BRM `0x1D0` → �
    - 卡 XML 定义 `0x10002038` bit0..3 对应 `CameraLinkChipStatus / Chip1Status / Chip2Status / Chip3Status`，同时在卡 XML 中紧挨着还有 `CameraLinkReLink (0x10002C00, WO, cmd=1)` 和 `CameraLinkAutoLink (0x10002034, RW)`，以及分图相关 `Width(out)=4096`、`CameraImageWidth=8192`、`SplitEn=0`。
    - 需要确认 `LusterGraber.dll` / VisionKit 在切换 `ClConfiguration=4 (EightyBit)` 时的完整初始化顺序（是否需要 `CameraLinkReLink` / 软复位，或者其它寄存器联动），否则即便放开 `preflight` 的 `-95`，卡 FPGA 在 `ClConfiguration=4` 下未锁进 `Chip0` 且 `LinePeriod10ns` 不计数时，开始采集仍可能收不到行数据。
 3. **`host/console/genicam.py` 选配优化**：`DEFAULT_FEATURES` 可补充 JAI 命名（`CameraLinkClkFrequency`、`InternalLineRate`、`MeasuredLineRate`、`AllExposureTime`、`LineTriggerMode`）以便 C3 直接读出时钟、行频与曝光。
+
+---
+
+## 9. Claude 复核第 8 节（同日）
+
+### 9.1 卡切 EightyBit 后 `CLChipStatus` 掉 bit0、行频 0.3 Hz：第二根线没信号，不是初始化顺序
+
+- 卡 XML：`0x10002020` bit0/1/2 = `CameraLinkPixelClock1/2/3`；`0x10002038` bit0 = `CameraLinkChipStatus`（本配置需要的芯片是否都好），bit1/2/3 = `Chip1/2/3Status`。
+- 两次实测像素时钟 `0x59`、`0x19`：**bit1、bit2 都是 0**，第 2、3 路时钟从来没出现过——不管卡是什么模式。
+- Base 只用芯片 1，所以 `CLChipStatus = 3`（总状态好 + 芯片 1 好）；EightyBit 要芯片 1、2、3，芯片 2、3 没时钟 → 总状态失败 → `2`；行频按 80 位重组后数不到完整行 → 0.3 Hz。切回 Base 立即恢复，完全吻合。
+- 第 7.2 节里"`CLChipStatus=3` = 两颗芯片锁钟"是我读错了，已在 BRINGUP 更正。相机是 EightyBit 这个结论由相机寄存器直接证实，不受影响。
+- `LusterGraber.dll` / `VisionKitApi.dll` 里没有任何 `ReLink` / `AutoLink` / `ClConfiguration` 的专门处理（字符串和地址都 0 命中），它们只是通过 GenApi 按卡 XML 写特征。所以没有遗漏的"切换初始化序列"。
+- **结论：查第二根 Camera Link 线**（相机口 2 ↔ 卡口 2）。
+
+### 9.2 已改
+
+| 项 | 改动 |
+|---|---|
+| 预检 | 接受 `ClConfiguration` = 0（Base）或 4（EightyBit）；按模式要求像素时钟：Base 要 bit0，EightyBit 要 bit0..2；五项都读完再判断 |
+| 提示 | `sg_status` / `capture` 缺时钟时打印 `missing clocks ...` 并直接说"EightyBit 需要两根线"；中控台转成中文提示 |
+| `sg_status` | 时钟位、CL 配置、`CLChipStatus` 按卡 XML 解释；新增只读 `CLAutoLink (0x10002034)` |
+| 相机写 | 新增 `camera-set`：只允许 `ClConfiguration`（0/3）和 `DeviceTapGeometry`（2/3，仅相机为 Base + Mono8 时，照相机 XML 的锁定公式）；先核对型号、写前写后读；不写 User Set。中控台「写入相机」 |
+| `cam_regs.h` | 用相机 XML 逐条核对：全部一致，改标 [16K确认]；**更正**串口波特率寄存器 `0x4 → 0x10004`（SBRM + 4；0x4 是厂商名）；传感器时钟 **80 → 96 MHz**（`cam_config.c` 同步） |
+| `genicam.py` | C3 默认表加上这台相机的自有名字：`CameraLinkClkFrequency`、`InternalLineRate`、`MeasuredLineRate`、`AllExposureTime` 等 |
+
+### 9.3 下一步（BRINGUP 第 5¾ 节）
+
+- **A**：接好第二根线 → 卡 `ClConfiguration 4` + `CameraWidth 16384` → 采图。50 kHz 最终方案。
+- **B**：不接第二根线 → 相机 `camera-set ClConfiguration 0`、`DeviceTapGeometry 3`，卡保持 Base/3 Tap，只改宽度 16384 → 采图。10 kHz 够用。
+- 两个都失败时：`FailedStage` / `LastHeader` 三行 + 「02½」全文。

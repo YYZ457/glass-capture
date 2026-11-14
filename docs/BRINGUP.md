@@ -100,9 +100,9 @@ python host/console/launch.py
 
 ## 5¾. 相机 XML 与 Camera Link 模式对齐（需要新驱动 cam_serial=1）
 
-**为什么要做**：4096 宽的基准图里 24 位只有 7 位在动（`col%3` 掩码 `0x47/0x46/0xc0`），而且卡报两颗 CL 芯片都锁了钟（`CLChipStatus=3`）。
-这说明相机很可能工作在 **Deca（80 位，10 Tap）**——16384 × 50 kHz 只有 Deca 带宽够，手册也写"支持 Deca 和 Base"——而卡还按 Base 3 Tap 解码。
-在这个前提下单改宽度没有意义。先从相机本身读出它的 XML 和实际配置，再让卡跟相机一致。
+**为什么要做**：4096 宽的基准图里 24 位只有 7 位在动（`col%3` 掩码 `0x47/0x46/0xc0`）：相机和卡的 Camera Link 模式不一致。
+（当时把 `CLChipStatus=3` 读成"两颗芯片锁钟"是错的：按卡 XML，bit0 是"总状态"、bit1 才是芯片 1，所以 3 = 只有芯片 1 在用且正常。）
+先从相机本身读出它的 XML 和实际配置，再让卡跟相机一致。
 
 前提：SD 卡用本次的新 `dist/glass-capture/`，加新编译的 `sg3000_rx.ko`（第 5 步之前不重编也能跑，端口 1 由程序拦截）。
 **不要用 `--port 1`**（单路卡，会让 PCIe 总线报错死机）。
@@ -113,17 +113,41 @@ python host/console/launch.py
 3. **C2 读取相机 XML**：几十 KB 约 10–60 秒。成功显示"相机 XML 已存到电脑 …，SHA1 与相机一致"。文件在 `D:\SG3000_Captures\camera-xml\`。
    - 板上等价：`/tmp/sg3000-board/sg3000-capture camera-xml /tmp/sg3000-board/camera-xml`
 4. **C3 读相机寄存器**：会列出 `Width`、`PixelFormat`、`ClConfiguration`、`DeviceTapGeometry`、`AcquisitionLineRate`、`ExposureTime` 等的当前值，存成 `camera-regs-*.txt`。
-   **把 XML 文件和这个 txt 一起发给 Claude**，然后再做第 5 步。
-5. **按相机的实际配置改卡**（只在第 4 步确认相机是 Deca / 10 Tap / 8 位之后；如果相机报的是别的组合，先发回来，不要照抄下面的值）。顺序固定：
-   1. `card-set ClConfiguration 4`（EightyBit）
-   2. `card-set DeviceTapGeometry 10`（卡 XML 规定 1X10 只在 ClConfiguration=4 时可用，所以先改 4）
-   3. `card-set CameraWidth 16384`
-   4. 「02½」确认三项读回值
-   5. 采一帧：板上 `sg3000-capture capture --output /tmp/sg3000-console/deca16k.pgm --timeout-ms 10000 --control-timeout-ms 2000`
-6. **看输出**：
-   - 成功：`Saved complete Mono8 frame: 16384 x 2000, 32768000 bytes`，经网口回传，看图是否正常（不再只有 7 位在动）。
-   - 失败：现在会多打印 `FailedStage: …`、`StopFailedStage: …`、`LastHeader …` 三行，**原样发回来**，就能知道卡在"开始命令"还是"DMA"还是"停止"。
-7. 恢复：断电即恢复卡的出厂参数（4096 / Base / 3 Tap）。相机这一节全程只读，没有改相机。
+   **把 XML 文件和这个 txt 一起发给 Claude**，然后再做下面的 A 或 B。
+
+**2026-11-14 结果**（实测报告第 8 节）：第 1–4 步全部通过。相机确认是 **16384 × Mono8 × EightyBit（10 Tap）× 85 MHz × 10 kHz**。
+卡切到 EightyBit 后预检报 -95（程序写死了 Base，已改），而且 **第 2、3 路像素时钟始终为 0**（`0x10002020` bit1、bit2；卡 XML 定义）→ **第二根 Camera Link 线上没有信号**。
+
+接下来二选一。**A 是最终方案**（50 kHz 要靠它），**B 不用第二根线、今天就能出 16K 图**（10 kHz 以内够用）。
+
+### A 方案：接第二根线，卡切 EightyBit
+
+1. **先查线**（断电操作）：相机背后两个 Camera Link 口、采集卡上两个口，**两根线都要接**，且相机口 1 ↔ 卡口 1、相机口 2 ↔ 卡口 2，不要交叉。记下卡上口的丝印。
+2. 上电，「02」→「02½」。此时卡还是 Base，看 `pixel clocks`：**bit1、bit2 应该变成 1**（例如 `0x5f` 或 `0x1f`）。还是 0 就停下，拍照发回来（线、口、丝印）。
+3. `card-set ClConfiguration 4`（卡固件会自动把 Tap 设为 10）→ `card-set CameraWidth 16384`。
+4. 「02½」：应 `Preflight passed`，`CLChipStatus = 15` 或至少 bit0 = 1，`LineRateHz ≈ 10000`。如果看到 `missing clocks 1 2 (EightyBit needs BOTH Camera Link cables...)`，就是第二根线仍没信号。
+5. 采一帧：`sg3000-capture capture --output /tmp/sg3000-console/deca16k.pgm --timeout-ms 10000 --control-timeout-ms 2000`，经网口回传看图。
+
+### B 方案：相机和卡都切 Base 3 Tap（只用一根线）
+
+依据：相机 XML 里 Base 时可选 `Geometry_1X2 / 1X3`。Base 3 Tap × 85 MHz 一行 16384 像素约 64 µs，当前 10 kHz 行频（100 µs/行）装得下；上限约 15 kHz。
+
+1. 断电重启（卡回到 Base / 3 Tap / 4096，相机回到 EightyBit）。「02」→「02½」。
+2. **改相机**（中控台「写入相机」，或板上命令），顺序固定：
+   1. `sg3000-capture camera-set ClConfiguration 0` → 应显示 `3 -> 0, readback 0`
+   2. `sg3000-capture camera-set DeviceTapGeometry 3` → `readback 3`（相机 XML 规定只有 Base 时才能改 Tap）
+3. 「C3 读相机寄存器」确认 `ClConfiguration = 0 (Base)`、`DeviceTapGeometry = 3`。
+4. **卡保持 Base / 3 Tap**，只改宽度：`card-set CameraWidth 16384`。
+5. 「02½」：`Preflight passed`，`LineRateHz ≈ 10000`。
+6. 采一帧（同 A 第 5 步）。判断：
+   - 正常的话，**24 位里不再只有 7 位在动**，灰度分布连续。遮住一半视野应该能看到对应的半边变暗。
+   - 如果每行末尾有 1–2 像素错位（16384 不能被 3 整除），换 `camera-set DeviceTapGeometry 2` 并 `card-set DeviceTapGeometry 2` 再试（2 Tap 一行 96 µs，10 kHz 刚好装得下）。
+7. 恢复：相机和卡都是断电恢复（`camera-set` 不写 User Set，不会改变相机的上电默认）。
+
+### 两个方案共用
+
+- 失败时把 `FailedStage` / `StopFailedStage` / `LastHeader` 三行和「02½」全文原样发回来。
+- 只用这些写操作：卡 `card-set`（5 个参数）、相机 `camera-set`（2 个参数）。其余全部只读。
 
 ## 6. 采到图之后可以马上做的验证（电脑上，不用板子）
 

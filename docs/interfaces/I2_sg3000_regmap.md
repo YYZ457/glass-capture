@@ -66,7 +66,7 @@ VisionKit 对这种回复**只查**偏移 18 = 0x8001、偏移 24 = 长度（Lus
 | 地址 | XML 名字 | 读写 | 实测 / 说明 |
 |---|---|---|---|
 | 0x10540024 | DDRInitialStatus | RO | 2 |
-| 0x10002020 | CameraLinkPixelClock1..3（bit0..2）| RO | 0x59 / 0x19，都能采图；bit3+ XML 未定义 |
+| 0x10002020 | CameraLinkPixelClock1..3（bit0..2）| RO | 0x59 / 0x19：bit1、bit2 一直是 0 = 第二根线无时钟（EightyBit 必需）；bit3+ XML 未定义 |
 | 0x10601000 | CameraScanType | RW | AreaScan 0 / LineScan 1 |
 | 0x10601004 | ClConfiguration | RW | Base 0 / Medium 1 / Full 2 / EightyBit 4；实测 0 |
 | 0x10601008 | CameraColorType | RW | Mono 0；实测 0 |

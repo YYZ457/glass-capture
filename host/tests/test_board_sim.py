@@ -279,3 +279,32 @@ def test_camera_xml_and_regs(board):
     fake.write_text(fake.read_text().replace(sha, "0" * 39 + "1"))
     job = run(console, "camera_xml")
     assert job["status"] == "error" and "SHA1" in job["message"], job
+
+
+def test_camera_set_and_two_cable_hint(board):
+    """相机写：电脑端先挡值域；板上读回一致才算成功。EightyBit 缺第二根线时，体检给出明确提示。"""
+    console, tmp = board
+    import transport as T
+    param = tmp / "cam_serial"
+    param.write_text("Y\n")
+    T.CAM_SERIAL_PARAM = str(param)
+    with pytest.raises(ValueError):
+        console.start("camera_set", {"name": "ClConfiguration", "value": 4})   # 相机的 EightyBit 是 3
+    with pytest.raises(ValueError):
+        console.start("camera_set", {"name": "UserSetSave", "value": 1})
+    fake = tmp / "board" / "sg3000-capture"
+    fake.write_text("#!/bin/bash\n[ \"$1\" = camera-set ] || exit 9\n"
+                    "echo \"CameraSet $2 0x01501008: 3 -> $3, readback $3\"\n"
+                    "echo 'CameraState ClConfiguration=0 (0 Base / 3 EightyBit) DeviceTapGeometry=3 PixelFormat=0x01080001 (not saved)'\n")
+    fake.chmod(0o755)
+    job = run(console, "camera_set", {"name": "ClConfiguration", "value": 0})
+    assert job["status"] == "success" and "3 → 0" in job["message"] and "DeviceTapGeometry=3" in job["message"], job
+
+    status = tmp / "board" / "sg_status"
+    status.write_text("#!/bin/bash\necho 'DDR status      2'\necho 'pixel clocks    0x00000019'\n"
+                      "echo 'CL config       4'\n"
+                      "echo 'missing clocks  1 2   (EightyBit needs BOTH Camera Link cables: is the 2nd cable plugged in at camera and card?)'\n"
+                      "echo 'Preflight FAILED: Link has been severed (-67)'\nexit 1\n")
+    status.chmod(0o755)
+    job = run(console, "status")
+    assert job["status"] == "error" and "第二根 Camera Link 线" in job["message"], job

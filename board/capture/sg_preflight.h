@@ -21,6 +21,14 @@ struct sg_capture_preflight {
     uint32_t valid_mask; /* bit0..4 依次表示上面 5 项是否读成功 */
 };
 
+#define SG_CL_BASE        0u   /* 卡 XML ClConfiguration */
+#define SG_CL_EIGHTY_BIT  4u
+
+/* 纯函数：这种 CL 配置要锁定哪几路像素时钟（bit0..2 = PixelClock1..3）；不支持的配置返回 0。 */
+uint32_t sg_preflight_required_clocks(uint32_t cl_configuration);
+/* 纯函数：要用但没锁定的像素时钟位（0 = 都在）。 */
+uint32_t sg_preflight_missing_clocks(const struct sg_capture_preflight *p);
+
 /* timeout_ms 必须在 1..2000 之间。即使返回错误，p 里已读到的项也有效（看 valid_mask）。 */
 int sg_capture_preflight(struct sg_capture_session *s, uint32_t timeout_ms,
                          struct sg_capture_preflight *p);

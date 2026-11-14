@@ -12,8 +12,8 @@
 #include "cam_serial.h"
 #include "sg_err.h"
 
-#define SENSOR_CLOCK_HZ     80000000u   /* 曝光、行周期的单位：80 MHz 时钟数 */
-#define CLK_PER_US          80u
+#define SENSOR_CLOCK_HZ     96000000u   /* 曝光、行周期的单位：96 MHz 时钟数（16K 相机 XML SensorClockFrequency）*/
+#define CLK_PER_US          96u
 #define CAM_TIMEOUT_MS      1000u
 
 #define MAX_WIDTH           16384u

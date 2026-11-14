@@ -35,6 +35,7 @@ struct card {
     unsigned long now;
     int cancel;
     int dma_calls;
+    uint32_t pixel_clocks;     /* 0 = 用实测 0x59 */
 };
 static struct card C;
 
@@ -89,8 +90,8 @@ static void card_process_mailbox(void)
         }
     } else switch (addr) {
         case SG_L_DDR_STATUS: val = 2; break;
-        case SG_L_PIXEL_CLOCKS: val = 0x59; break;
-        case SG_L_CL_CONFIG: val = 0; break;
+        case SG_L_PIXEL_CLOCKS: val = C.pixel_clocks ? C.pixel_clocks : 0x59; break;
+        case SG_L_CL_CONFIG: val = 0; goto param;
         case SG_L_CAMERA_COLOR: val = 0; break;
         case SG_L_CAMERA_DEPTH: val = 8; break;
         case SG_L_CAMERA_WIDTH: val = 4096; goto param;
@@ -193,6 +194,20 @@ int main(void)
     CHECK(sg_capture_preflight(&s, 1000, &p) == 0);
     CHECK(p.ddr_status == 2 && p.pixel_clocks == 0x59 && p.camera_depth == 8 && p.valid_mask == 31);
     CHECK(sg_capture_preflight(&s, 0, &p) == -EINVAL && sg_capture_preflight(&s, 2001, &p) == -EINVAL);
+    /* EightyBit：2026-11-14 实板只接一根线，时钟 0x19（只有第 1 路）→ ENOLINK，缺第 2、3 路 */
+    CHECK(sg_mbx_write_value(&s, SG_L_CL_CONFIG, 4, 1000) == 0);
+    C.pixel_clocks = 0x19;
+    CHECK(sg_capture_preflight(&s, 1000, &p) == -ENOLINK && p.cl_configuration == 4 && p.valid_mask == 31);
+    CHECK(sg_preflight_missing_clocks(&p) == 0x6);
+    C.pixel_clocks = 0x1f;                                   /* 两根线都接上 */
+    CHECK(sg_capture_preflight(&s, 1000, &p) == 0);
+    CHECK(sg_mbx_write_value(&s, SG_L_CL_CONFIG, 2, 1000) == 0);   /* Full：不支持 */
+    CHECK(sg_capture_preflight(&s, 1000, &p) == -ENOTSUP);
+    CHECK(sg_mbx_write_value(&s, SG_L_CL_CONFIG, 0, 1000) == 0);
+    C.pixel_clocks = 0x18;                                   /* Base 没有第 1 路时钟 */
+    CHECK(sg_capture_preflight(&s, 1000, &p) == -ENOLINK && sg_preflight_missing_clocks(&p) == 1);
+    C.pixel_clocks = 0;
+    CHECK(sg_preflight_required_clocks(1) == 0 && sg_preflight_required_clocks(0) == 1 && sg_preflight_required_clocks(4) == 7);
 
     /* 3b. 读卡存储（sg_cardxml）：URL 字节顺序、解析、按地址读出文件 */
     {

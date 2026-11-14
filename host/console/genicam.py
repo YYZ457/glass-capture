@@ -33,6 +33,9 @@ DEFAULT_FEATURES = [
     'TestPattern', 'TestImageSelector', 'TestPatternGeneratorSelector',
     'DeviceLinkSpeed', 'DeviceSerialPortBaudRate', 'ClSerialPortBaudRate',
     'UserSetSelector', 'UserSetDefault', 'UserSetDefaultSelector', 'DeviceTemperature',
+    # 凌云光 / JAI 这台 16K 相机 XML 里的自有名字（2026-11-14 从相机读出的 XML）
+    'CameraLinkClkFrequency', 'InternalLineRate', 'MeasuredLineRate', 'AllExposureTime',
+    'MeasuredExposureTime', 'ExposureTimeMode', 'LineTriggerMode', 'LineTriggerSource', 'LineTriggerActivation',
 ]
 
 REG_TYPES = {'IntReg', 'MaskedIntReg', 'FloatReg', 'StringReg', 'Register', 'StructReg'}

@@ -75,6 +75,7 @@ function update(s) {
   });
   $('net-setup').disabled = !s.connected || !s.shell_ready || s.busy || !s.identity_ok;
   $('card-set').disabled = $('net-setup').disabled;
+  $('camera-set').disabled = $('net-setup').disabled;
   $('net-state').textContent = s.net && s.net.pc_ip ? `网口已通：板子 → 电脑 ${s.net.pc_ip}:${s.net.port}。回传和连续候选走网口。` : '网口未配置：回传走 USB 串口。先「从 SD 加载程序」，再填 IP 测试。';
   const fields = s.checks.fields || {}, p = s.checks.preflight, live = s.connected;
   $('linux-state').textContent = fields.KERNEL ? (live ? '已读内核 · ' : '断开前 · ') + fields.KERNEL : '等待检查';
@@ -84,8 +85,8 @@ function update(s) {
   $('dma-state').textContent = s.last_frame ? (s.last_frame.local_path ? '已存到电脑' : '已确认板上保存图像') : '尚未确认图像接收';
   $('ddr').textContent = trusted ? (p.ddr === 0 ? '0 · 条件满足' : p.ddr === 2 ? '2 · DDR 校准完成' : String(p.ddr) + ' · 需核实') : '未确认读取';
   $('clock').textContent = trusted ? (p.clocks & 1 ? '锁定' : '未锁定') + ' / 0x' + p.clocks.toString(16) : '未确认读取';
-  $('format').textContent = p?.passed && p.config ? 'Base / Mono8' : 'Mono8 (8-bit 灰度)';
-  if ($('cl-mode')) $('cl-mode').textContent = p?.config ? (p.config.cl === 0 ? 'Base 模式 (单缆 Port 0)' : 'Medium/Full 模式') : 'Base 模式 (单缆 Port 0)';
+  $('format').textContent = p?.passed && p.config ? (p.config.cl === 4 ? 'EightyBit / Mono8' : 'Base / Mono8') : 'Mono8 (8-bit 灰度)';
+  if ($('cl-mode')) $('cl-mode').textContent = p?.config ? (p.config.cl === 0 ? 'Base 模式 (单缆 Port 0)' : p.config.cl === 4 ? 'EightyBit 模式 (双缆 10 Tap)' : '其他模式') : '未确认';
   if ($('camera-geo')) $('camera-geo').textContent = s.last_frame?.width ? `${s.last_frame.width} × ${s.last_frame.height} (16K 基础)` : '4096 × 2000 (16K 线扫 / 4K ROI)';
   if ($('pci-hw')) $('pci-hw').textContent = fields.VENDOR ? `${fields.VENDOR}:${fields.DEVICE} · sg3000_rx` : '0x4c54:0x3000 · C2H0';
   $('prepared').textContent = s.checks.prepared ? '已加载到板上 /tmp' : '尚未由中控台加载';
@@ -143,6 +144,7 @@ try { $('net-pc').value = localStorage.getItem('sg-net-pc') || ''; $('net-board'
 $('net-setup').onclick=()=>{ const pc=$('net-pc').value.trim(), board=$('net-board').value.trim();
   try { localStorage.setItem('sg-net-pc', pc); localStorage.setItem('sg-net-board', board); } catch {}
   post('action',{action:'network',options:{pc_ip:pc,board_ip:board}}); };
+$('camera-set').onclick=()=>post('action',{action:'camera_set',options:{name:$('camera-name').value,value:Number($('camera-value').value)}});
 $('card-set').onclick=()=>post('action',{action:'card_set',options:{name:$('card-name').value,value:Number($('card-value').value)}});
 $('start-stream').onclick=()=>post('action',{action:'stream',options:{seconds:Number($('stream-seconds').value),processor:$('stream-processor').value}});
 $('copy-path').onclick=async()=>{try{await navigator.clipboard.writeText(sourcePath);toast('源码完整路径已复制');}catch{toast(sourcePath,true);}};

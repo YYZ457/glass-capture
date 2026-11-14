@@ -5,8 +5,8 @@
 ## 1. 整条链路和状态
 
 ```
-cam_config（宽度、行频、曝光……）      地址表 cam_regs.h [参考8K]          🟡 等相机 XML 核对
-   │ cam_xml：清单表 → 读相机 XML        GenCP 标准引导 [逆向+标准]           🟡 纯函数有测试，待上板
+cam_config（宽度、行频、曝光……）      地址表 cam_regs.h [16K确认]         🟡 地址已按相机 XML 核对，写路径未上板
+   │ cam_xml：清单表 → 读相机 XML        GenCP 标准引导 [逆向+标准]           ✅ 实板 2 s 读出 18,279 B zip
    │ cam_gencp_read32 / write32           GenCP 包 + 反码校验和 [逆向]          ✅ 实板读出 JAI / 型号
    │ cam_serial_send / recv               串口邮箱 0x4110xx [逆向]              ✅ 实板
    │ cam_serial_open / set_baud           初始化 + UART16550 分频（BAR0）[逆向]  ✅ 实板，115200
@@ -22,6 +22,9 @@ cam_config（宽度、行频、曝光……）      地址表 cam_regs.h [参考
 | `sg3000-capture camera-xml DIR` | 按清单表从相机读出它自己的 GenICam XML（.zip/.xml），打印 SHA1 | C2 读取相机 XML |
 | `sg3000-capture camera-regs NAME@ADDR:LEN ...` | 按清单读一串寄存器 | C3 读相机寄存器 |
 | `sg3000-capture camera-read ADDR [LEN]` | 读任意地址，十六进制打印 | — |
+| `sg3000-capture camera-set ClConfiguration\|DeviceTapGeometry V` | **唯一的相机写**：CL 模式 0 Base / 3 EightyBit；Tap 2/3（仅 Base）。核对型号、写后读回，不存 User Set | 写入相机 |
+
+相机自己的 XML：`docs/vendor/camera_xml/SW-WS2-CL16K-50M-SDE_0.0.3.zip`（解压为 `SF6000V300R001C22XB003.xml`）。注意这台相机的 `ClConfiguration` 枚举 EightyBit = **3**，采集卡的是 **4**，两边编号不同。
 
 C3 的清单由电脑上的 `host/console/genicam.py` 从相机 XML 生成，读回的值也由它翻译成名字和枚举（`python host/console/genicam.py 相机.zip --decode 板上输出.txt`）。
 
