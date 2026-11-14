@@ -110,6 +110,7 @@
   - 编号 = `atoi(通道名) − 1`，第 1 路是 0（0x180006a71）。
   - 读的方式是 `SGCardCmdHelper::ReadMemory`（0x18000c670）：用 `0x80000000` 读包，每包最多 0x100 字节，地址原样放进请求，失败重试 5 次。
 - `ReadXmlFile`（0x180007dca）：URL 以 `File` 开头就读 Windows 本地的 `SGCard.xml`；以 `Local` 开头就按 `;` 拆出文件名、十六进制地址、十六进制长度（0x180008310），用同样的方式读出来，写成文件。
+- 回复检查（`SGCardCmdHelper::ReadData` 0x18000cf9a..0x18000d091）：XDMA.sys 收 `\grabber_0` 时去掉 16 字节头（0x140003820），所以 DLL 看到的偏移 k = 我们的 16 + k。DLL 只查 **偏移 18 = 0x8001**（先查 bit0）和 **偏移 24 = 请求长度**，数据从偏移 28 起。偏移 16（我们一直要求为 0）、4、8 和 ACK 计数都不查。实板上严格检查读 0x190 失败（-EPROTO），因此 `sg_cardxml` 改用这套检查，每包 0x100 字节。
 - **意义**：板子上用现有的邮箱读（预检用的就是它，旧驱动即可）就能把卡的 XML 读出来，**不用去 Windows**。已实现：`sg_status --card-xml DIR`，中控台按钮「02¾ 读取采集卡 XML」。
 
 ### 2.4 新发现：相机的 GenCP（VisionKitApi.dll `gcp2::GenCpCmdHelper`）

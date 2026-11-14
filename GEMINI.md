@@ -19,6 +19,7 @@
 - **板上程序的输出文字不要改**：`host/console/transport.py` 和 `telemetry.py` 用正则解析它们（`DDRInitialStatus=`、`Saved complete Mono8 frame:`、`SGJSON {...}` 等）。
 - **串口命令必须是纯 ASCII**（`transport.py` 里发给板子的 shell 命令不能有中文）。
 - **`legacy/` 只读**，是迁移参照。
+- **卡邮箱有两种读**：寄存器用 `sg_mbx_read`（严格检查，实测可靠）；卡存储（URL / XML）用 `sg_mbx_read_block`（照 VisionKit 只查两项）。不要把严格检查放宽到寄存器读上。
 - **驱动白名单改了要跑 `make -C board test`**（含 `driver_whitelist_test`）。
 - **检测算法 C 和 Python 两份必须一致**：`board/processing/sg_candidates.c` ↔ `host/detect/candidates.py`。改一边就改另一边。
 - 板上程序静态链接，不要依赖动态库或域名解析。

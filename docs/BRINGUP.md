@@ -94,6 +94,7 @@ python -I host/detect/candidates.py D:\SG3000_Captures\某张图.pgm --threshold
 |---|---|---|
 | 02 报"没有 glass-capture 文件夹" | 第 1 步没拷，或拷进了子文件夹 | 检查 SD 根目录下直接就是 `glass-capture\sg3000-capture` |
 | 02 报 `sha256sum` FAILED | 拷贝不完整 | 重新拷整个文件夹 |
+| 02 报 `can't open 'sg3000-capture\r'` | 旧版中控台 + Windows 检出把 SHA256SUMS 变成了 CRLF | 用新版中控台（已自动去掉 `\r`）；或者删掉本地 `dist` 文件夹后 `git checkout -- dist` 重新检出 |
 | 02½ 报"打不开采集卡设备" | 驱动没加载 / 别的程序占着卡 | 点「读取内核日志」，看 `sg3000_rx` 相关行 |
 | 03 报 `Link has been severed (-67)` | Camera Link 时钟没锁定 | 相机上电了吗？线插在 Port 0 吗？看体检里 `pixel clocks` 那一行 |
 | 03 报 `(-95)` | CL 配置 / 彩色 / 位深不是 Base / 黑白 / 8 位 | 相机配置被改过；用 VisionKit 恢复 |

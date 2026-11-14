@@ -6,7 +6,7 @@
  *   1. 第 N 路的 URL 字符串在逻辑地址 0x190 + N*0x100，长 0x100 字节（以 0 结尾）
  *   2. URL 形如 "Local:<文件名>;<十六进制地址>;<十六进制长度>"（"File:..." 表示 XML 在 Windows 本地）
  *   3. 再按地址和长度读出文件内容（可能是 .xml 或 .zip）
- * 全程只用卡邮箱的"读"，和预检同一条路径，旧驱动即可。
+ * 全程只用卡邮箱的"读"（请求和预检同一种，只是长度更长），旧驱动即可。
  */
 #ifndef SG_CARDXML_H
 #define SG_CARDXML_H
@@ -24,7 +24,7 @@ enum sg_cardxml_kind { SG_CARDXML_LOCAL = 0, SG_CARDXML_FILE = 1 };
  * name 只保留字母、数字和 ._-，其余换成 _。 */
 int sg_cardxml_parse_url(const char *url, char *name, size_t name_cap, uint32_t *addr, uint32_t *len);
 
-/* 用邮箱读把 [addr, addr+len) 读进 buf，每次读 4 字节（和预检同一种读）。addr 要 4 字节对齐。 */
+/* 把 [addr, addr+len) 读进 buf：照 Windows 每包 0x100 字节（sg_mbx_read_block）。addr 要 4 字节对齐。 */
 int sg_cardxml_read(struct sg_capture_session *s, uint32_t addr, void *buf, uint32_t len,
                     uint32_t timeout_ms);
 

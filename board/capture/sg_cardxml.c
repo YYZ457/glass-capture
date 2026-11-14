@@ -63,15 +63,24 @@ int sg_cardxml_parse_url(const char *url, char *name, size_t name_cap, uint32_t 
 int sg_cardxml_read(struct sg_capture_session *s, uint32_t addr, void *buf, uint32_t len,
                     uint32_t timeout_ms)
 {
-    unsigned char *out = buf;
-    uint32_t i, v, b;
+    unsigned char *out = buf, tail[4];
+    uint32_t done = 0, n;
     int ret;
 
     if (!s || !buf || !len || (addr & 3u) || (uint64_t)addr + len > 0x100000000ull) return -EINVAL;
-    for (i = 0; i < len; i += 4) {
-        ret = sg_mbx_read(s, addr + i, &v, timeout_ms, 0);
+    /* 照 Windows：每包 0x100 字节 */
+    while (len - done >= 4) {
+        n = len - done;
+        if (n > SG_MBX_BLOCK_MAX) n = SG_MBX_BLOCK_MAX;
+        n &= ~3u;
+        ret = sg_mbx_read_block(s, addr + done, out + done, n, timeout_ms);
         if (ret) return ret;
-        for (b = 0; b < 4 && i + b < len; ++b) out[i + b] = (unsigned char)(v >> (8u * b));
+        done += n;
+    }
+    if (done < len) {                       /* 不足 4 字节的尾巴：读一个字，只取需要的 */
+        ret = sg_mbx_read_block(s, addr + done, tail, 4, timeout_ms);
+        if (ret) return ret;
+        memcpy(out + done, tail, len - done);
     }
     return 0;
 }

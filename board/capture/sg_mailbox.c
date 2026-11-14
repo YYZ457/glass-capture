@@ -62,7 +62,7 @@ static void put32(unsigned char *p, uint32_t value)
 
 /* ---- 第 1 步：发送 --------------------------------------------------- */
 
-static int mbx_send(struct sg_capture_session *s, uint32_t address, int write)
+static int mbx_send(struct sg_capture_session *s, uint32_t address, int write, uint32_t read_len)
 {
     /* 报文共 7 个字（读）或 8 个字（写）。下标含义见 sg_mailbox.h 顶部注释。
      * 先填固定的字，其余几个字下面再填。 */
@@ -96,6 +96,9 @@ static int mbx_send(struct sg_capture_session *s, uint32_t address, int write)
     packet[2] = (write ? 16u : 12u) | ((uint32_t)s->request_id << 16);
     packet[4] = write ? SG_MBX_OP_WRITE : SG_MBX_OP_READ;
     packet[5] = address;
+    if (!write) {
+        packet[6] = read_len;               /* 读多少字节：寄存器 4；卡存储块读最多 0x100 */
+    }
 
     /* 逐字写进发送窗口，最后写一次"总字节数"，卡才会把报文发出去。 */
     for (i = 0; i < words; ++i) {
@@ -160,6 +163,8 @@ static int mbx_fetch_reply(struct sg_capture_session *s, unsigned char *reply,
     }
 
     *length_out = length;
+    memcpy(s->last_reply, reply, length < sizeof s->last_reply ? length : sizeof s->last_reply);
+    s->last_reply_len = length;
     return 0;
 }
 
@@ -214,7 +219,7 @@ static int mbx_transact(struct sg_capture_session *s, uint32_t address, int writ
         return -EPERM;
     }
 
-    ret = mbx_send(s, address, write);
+    ret = mbx_send(s, address, write, 4);
     if (ret) {
         return ret;
     }
@@ -247,4 +252,40 @@ int sg_mbx_write(struct sg_capture_session *s, uint32_t logical_addr,
         return -EINVAL;
     }
     return mbx_transact(s, logical_addr, 1, NULL, timeout_ms, cleanup);
+}
+
+/* ---- 卡存储块读（照 LusterGraber.dll SGCardCmdHelper::ReadData）---------
+ *
+ * Windows 读卡存储（URL、XML）时每包最多 0x100 字节，而且回复只查两项
+ * （LusterGraber.dll 0x18000cf9a..0x18000d091；XDMA.sys 去掉 16 字节头后的偏移 +16 换算）：
+ *   偏移 18 = 0x8001，偏移 24 = 请求的长度。数据从偏移 28 开始。
+ * 偏移 4 / 8 / 16 和 ACK 计数它都不查。实板上用严格检查读 0x190 得到 -EPROTO，
+ * 所以卡存储用这套 Windows 的检查；寄存器读仍走上面的严格检查。 */
+int sg_mbx_read_block(struct sg_capture_session *s, uint32_t logical_addr, void *buf,
+                      uint32_t len, uint32_t timeout_ms)
+{
+    unsigned char reply[MBX_REPLY_MAX];
+    uint32_t length = 0;
+    uint64_t deadline;
+    int ret;
+
+    if (s == NULL || buf == NULL || len == 0 || len > SG_MBX_BLOCK_MAX || (len & 3u)) {
+        return -EINVAL;
+    }
+    if (sg_session_cancelled(s)) {
+        return -ECANCELED;
+    }
+    deadline = s->io.now_ms(s->io.context) + timeout_ms;
+    if ((ret = mbx_send(s, logical_addr, 0, len)) ||
+        (ret = mbx_wait_reply(s, deadline, 0)) ||
+        (ret = mbx_fetch_reply(s, reply, &length))) {
+        return ret;
+    }
+    if (length < 28u + len || le16(reply + 18) != SG_MBX_ACK_READ || le16(reply + 24) != len) {
+        return -EPROTO;
+    }
+    s->have_ack = 1;                        /* 记下 ACK 计数，后面的严格读仍要求连续 */
+    s->last_ack = le16(reply + 10);
+    memcpy(buf, reply + 28, len);
+    return 0;
 }

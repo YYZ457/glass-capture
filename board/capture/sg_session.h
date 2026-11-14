@@ -26,6 +26,9 @@ struct sg_capture_session {
     uint16_t request_id;           /* 邮箱请求计数，每发一条 +1 */
     uint16_t last_ack;             /* 上一条回复的 ACK 计数 */
     int have_ack;                  /* 是否已收到过回复（之后 ACK 必须连续）*/
+    /* 诊断用：最近一条邮箱回复的前 64 字节（出错时打印出来对照），不参与任何判断 */
+    unsigned char last_reply[64];
+    uint32_t last_reply_len;       /* 回复的完整字节数 */
 };
 
 /* 填默认超时。 */

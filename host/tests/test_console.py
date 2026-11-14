@@ -129,7 +129,7 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual(self.job('prepare')['status'], 'success')
         commands = '\n'.join(self.c.port.commands)
         self.assertIn('mount -t vfat -o ro', commands)
-        self.assertIn('sha256sum -c SHA256SUMS', commands)
+        self.assertIn("tr -d '\\r' < SHA256SUMS | sha256sum -c", commands)
         self.assertIn('umount /mnt/sg3000-console', commands)
         self.assertIn('fi && test -e', commands)
         self.assertIn('sg3000-capture version', commands)

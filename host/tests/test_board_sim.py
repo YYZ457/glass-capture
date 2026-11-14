@@ -176,3 +176,14 @@ def test_card_xml_fetched(board):
     fake.write_text("#!/bin/bash\necho 'CardXML FAILED: URL is not \"Local:<name>;<addr>;<len>\"'\nexit 3\n")
     job = run(console, "card_xml")
     assert job["status"] == "error" and "URL is not" in job["message"]
+
+
+def test_prepare_accepts_crlf_checksums(board):
+    """Windows 检出（core.autocrlf=true）会把 SHA256SUMS 变成 CRLF，「从 SD 加载程序」仍要通过。"""
+    console, tmp = board
+    sums = tmp / "sd" / "glass-capture" / "SHA256SUMS"
+    sums.write_bytes(sums.read_bytes().replace(b"\n", b"\r\n"))
+    legacy = tmp / "sd" / "sg3000-linux-20261023" / "SHA256SUMS"
+    legacy.write_bytes(legacy.read_bytes().replace(b"\n", b"\r\n"))
+    job = run(console, "prepare")
+    assert job["status"] == "success", job

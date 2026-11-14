@@ -152,6 +152,33 @@ static void swap_words(unsigned char *p, size_t n)
     }
 }
 
+/* 诊断：把最近一条邮箱回复原样打出来（十六进制，按 4 字节一组，小端字）。 */
+static void print_last_reply(const struct sg_capture_session *s, const char *what)
+{
+    uint32_t i, n = s->last_reply_len < sizeof s->last_reply ? s->last_reply_len : sizeof s->last_reply;
+
+    printf("CardXML reply %s: %u bytes:", what, s->last_reply_len);
+    for (i = 0; i < n; ++i) printf("%s%02x", i % 4 ? "" : " ", s->last_reply[i]);
+    printf("\n");
+}
+
+/* 读 URL 失败时再试两种读法，各打一行结果和原始回复，帮助判断卡到底回了什么。只读。 */
+static void diagnose_url_read(struct sg_capture_session *s, uint32_t timeout_ms)
+{
+    unsigned char b[4];
+    uint32_t v;
+    int ret;
+
+    ret = sg_mbx_read_block(s, SG_CARDXML_URL_ADDR(0), b, 4, timeout_ms);
+    printf("CardXML probe block4 @0x190: %d, data %02x %02x %02x %02x\n", ret, b[0], b[1], b[2], b[3]);
+    print_last_reply(s, "block4");
+    ret = sg_mbx_read(s, SG_CARDXML_URL_ADDR(0), &v, timeout_ms, 0);
+    printf("CardXML probe strict @0x190: %d, value 0x%08x\n", ret, ret ? 0u : v);
+    print_last_reply(s, "strict");
+    ret = sg_mbx_read(s, SG_L_DDR_STATUS, &v, timeout_ms, 0);
+    printf("CardXML probe strict DDR after: %d, value %u\n", ret, ret ? 0u : v);
+}
+
 static int dump_card_xml(struct sg_capture_session *s, const char *dir, uint32_t timeout_ms)
 {
     char url[SG_CARDXML_URL_LEN + 1], name[128], path[512], tmp[540];
@@ -163,8 +190,10 @@ static int dump_card_xml(struct sg_capture_session *s, const char *dir, uint32_t
 
     puts("== Card XML ==");
     ret = sg_cardxml_read(s, SG_CARDXML_URL_ADDR(0), url, SG_CARDXML_URL_LEN, timeout_ms);
+    print_last_reply(s, "first URL read (256-byte block)");
     if (ret) {
         printf("CardXML FAILED: read URL at 0x%x: %s (%d)\n", SG_CARDXML_URL_ADDR(0), strerror(-ret), ret);
+        diagnose_url_read(s, timeout_ms);
         return ret;
     }
     url[SG_CARDXML_URL_LEN] = 0;
@@ -189,7 +218,7 @@ static int dump_card_xml(struct sg_capture_session *s, const char *dir, uint32_t
         puts("CardXML FAILED: URL is not \"Local:<name>;<addr>;<len>\"");
         return -EPROTO;
     }
-    printf("CardXML file %s at 0x%08x, %u bytes; reading 4 bytes per mailbox request...\n", name, addr, len);
+    printf("CardXML file %s at 0x%08x, %u bytes; reading 256 bytes per mailbox request...\n", name, addr, len);
     fflush(stdout);
 
     data = malloc(len);
@@ -199,6 +228,7 @@ static int dump_card_xml(struct sg_capture_session *s, const char *dir, uint32_t
     if (!ret && swapped) swap_words(data, len);
     if (ret) {
         printf("CardXML FAILED: read data: %s (%d)\n", strerror(-ret), ret);
+        print_last_reply(s, "data");
         free(data);
         return ret;
     }

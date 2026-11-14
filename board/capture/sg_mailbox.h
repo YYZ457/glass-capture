@@ -29,4 +29,10 @@ int sg_mbx_read(struct sg_capture_session *s, uint32_t logical_addr, uint32_t *v
 int sg_mbx_write(struct sg_capture_session *s, uint32_t logical_addr,
                  uint32_t timeout_ms, int cleanup);
 
+/* 卡存储块读：一次读 len 字节（4 的倍数，4..SG_MBX_BLOCK_MAX），回复只做 Windows 那两项检查。
+ * 只给 sg_cardxml 用（读 URL 和 XML）；寄存器请用 sg_mbx_read。 */
+#define SG_MBX_BLOCK_MAX 0x100u
+int sg_mbx_read_block(struct sg_capture_session *s, uint32_t logical_addr, void *buf,
+                      uint32_t len, uint32_t timeout_ms);
+
 #endif

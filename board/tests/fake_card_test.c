@@ -25,7 +25,8 @@
 
 struct card {
     uint32_t tx[8]; unsigned ntx;
-    uint32_t rx[8]; unsigned nrx, rxpos, rx_len_bytes;
+    uint32_t rx[80]; unsigned nrx, rxpos, rx_len_bytes;
+    int storage_status;                        /* 读卡存储（地址 < 0x10000000）时回复偏移 16 填非 0 */
     unsigned ack;
     int started, stopped, hdr_ready, packets_sent, ack_skip, bad_magic, preload_rx;
     uint32_t block_id;
@@ -75,7 +76,7 @@ static uint32_t hdr_val(uint32_t off)
 static void card_process_mailbox(void)
 {
     int write = (C.tx[4] == SG_MBX_OP_WRITE);
-    uint32_t addr = C.tx[5], val = 0;
+    uint32_t addr = C.tx[5], val = 0, len = write ? 0 : C.tx[6], i;
     C.ack += 1 + C.ack_skip; C.ack_skip = 0;
     if (write) {
         if (addr == SG_L_ACQ_START) C.started = 1, C.hdr_ready = 1;
@@ -92,9 +93,12 @@ static void card_process_mailbox(void)
     C.rx[0] = 0x000055aa; C.rx[1] = 1;
     C.rx[2] = (write ? 12u : 16u) | (C.ack << 16);
     C.rx[4] = write ? 0x80030000u : 0x80010000u;
-    C.rx[6] = write ? 0u : 4u;
-    C.rx[7] = val;
-    C.rx_len_bytes = write ? 28 : 32;
+    if (!write && C.storage_status && addr < 0x10000000u) C.rx[4] |= 1u;
+    C.rx[6] = len;
+    if (len == 4) C.rx[7] = val;
+    else for (i = 0; i < len / 4 && i < 73; ++i) C.rx[7 + i] = storage_word(addr + 4 * i);
+    if (!write) C.rx[2] = (12u + len) | (C.ack << 16);
+    C.rx_len_bytes = 28 + len;
     C.nrx = C.rx_len_bytes / 4; C.rxpos = 0;
 }
 
@@ -190,8 +194,17 @@ int main(void)
         CHECK(sg_cardxml_parse_url(url, name, sizeof name, &a, &l) == SG_CARDXML_LOCAL && a == 0x4000 && l == 10);
         memset(xml, 0, sizeof xml);
         CHECK(sg_cardxml_read(&s, a, xml, l, 1000) == 0 && !memcmp(xml, CARD_XML, 10) && xml[10] == 0);
-        CHECK(s.request_id == 64 + 3 && C.regs_written_bad == 0);
+        CHECK(s.request_id == 3 && C.regs_written_bad == 0);   /* URL 256 字节 1 包；XML 10 字节 = 8 字节 1 包 + 尾巴 1 包 */
+        CHECK(C.tx[6] == 4);                                  /* 最后一包是 4 字节尾巴 */
+        CHECK(!memcmp(s.last_reply, "\xaa\x55\x00\x00", 4) && s.last_reply_len == 32);
         CHECK(sg_cardxml_read(&s, 0x191, xml, 4, 1000) == -EINVAL);
+        /* 实板现象：卡存储回复偏移 16 非 0 → 严格读 -EPROTO，块读（Windows 的检查）照常 */
+        reset(); sg_capture_session_init(&s, &IO); C.storage_status = 1;
+        CHECK(sg_mbx_read(&s, 0x190, &v, 1000, 0) == -EPROTO);
+        CHECK(sg_cardxml_read(&s, SG_CARDXML_URL_ADDR(0), url, SG_CARDXML_URL_LEN, 1000) == 0);
+        CHECK(!strcmp(url, CARD_URL));
+        CHECK(sg_mbx_read(&s, SG_L_DDR_STATUS, &v, 1000, 0) == 0 && v == 2);   /* ACK 仍连续 */
+        CHECK(sg_mbx_read_block(&s, 0x190, xml, 6, 1000) == -EINVAL);
     }
 
     /* 4. 块头检查（纯函数） */

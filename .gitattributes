@@ -1,0 +1,5 @@
+# 板上要用的文件一律按原样存取，不做换行转换。
+# Windows 默认 core.autocrlf=true 会把 SHA256SUMS 变成 CRLF，板上 sha256sum -c 就会失败。
+dist/** -text
+*.sh text eol=lf
+board/driver/module.sh text eol=lf

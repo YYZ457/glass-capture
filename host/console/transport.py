@@ -345,11 +345,11 @@ class Console:
             rc, _ = self.exchange(f"test -d {SD_BUNDLE}")
             if rc:
                 raise RuntimeError('SD 卡第一个分区根目录下没有 glass-capture 文件夹。按 docs/BRINGUP.md 第 1 步拷贝。')
-            self.run_checked(f"cd {SD_BUNDLE} && sha256sum -c SHA256SUMS && mkdir -p {BOARD_DIR} /run && "
+            self.run_checked(f"cd {SD_BUNDLE} && test -s SHA256SUMS && tr -d '\\r' < SHA256SUMS | sha256sum -c && mkdir -p {BOARD_DIR} /run && "
                              f"cp sg3000-capture sg3000-stream sg_status {BOARD_DIR}/ && chmod 700 {BOARD_DIR}/sg*", 20)
             # 驱动：新目录里有就用新目录的（已由 SHA256SUMS 校验），否则用旧目录里校验过的那一份
             self.run_checked(f"if [ -f {SD_BUNDLE}/sg3000_rx.ko ]; then cp {SD_BUNDLE}/sg3000_rx.ko {BOARD_DIR}/; "
-                             f"else cd {SD_LEGACY} && grep ' sg3000_rx.ko$' SHA256SUMS | sha256sum -c && cp sg3000_rx.ko {BOARD_DIR}/; fi", 20)
+                             f"else cd {SD_LEGACY} && test -s SHA256SUMS && tr -d '\\r' < SHA256SUMS | grep ' sg3000_rx.ko$' | sha256sum -c && cp sg3000_rx.ko {BOARD_DIR}/; fi", 20)
         finally:
             self.run_checked('umount ' + SD_MOUNT, allow_cancel=True)
         for app, expected in ((APP, APP_VERSION), (STREAM_APP, STREAM_VERSION)):
