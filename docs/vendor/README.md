@@ -9,6 +9,7 @@
 | `visionkit_sdk/` | SDK 头文件 + 3 页开发示例 PDF | ✅ 真实。API 列表见 `VkApiDefination.h` |
 | `genicam_xml_8k_reference/` | 3 份凌云光 SF 系列相机 GenICam XML | ✅ 真实，但**都不是我们这台**：SF6200-**CL08K**、SF6100-CL08K、SF3000-CL04K，传感器 8192 / 4096 宽 |
 | `agent_report_unverified.md` | 另一个 agent 写的集成报告 | ⚠️ 部分对、部分无依据，见文件开头的核对表 |
+| `reverse_engineering_2026-11-14.md` | 反汇编 XDMA.sys / VisionKit DLL 的结论（Gemini）| [逆向]：带出处地址；二进制不在仓库，Claude 只做了旁证 |
 
 ## 关于相机的身份
 
@@ -36,5 +37,5 @@ SDK 会从相机本身"下载 XML"（`VkSetMaxBaudrateDownXmlSupport`），说�
 
 1. **16K 相机自己的 XML**。线索：这 3 份 XML 的文件名格式（`SchemaVersion.1.1@Luster#型号#版本@XMLVersion...xml`）像是 VisionKit 的缓存文件名。
    在 Windows 电脑上用 VisionKit 连一次 16K 相机，然后全盘搜 `SchemaVersion*CL16K*`，很可能就有了。
-2. **采集卡的 XML**（报告称为 `SGCard.xml`，存在卡的 Flash 里，未核实）：`CameraWidth` 的真实地址在里面。
+2. **采集卡的 XML** `SGCard.xml`：`CameraWidth` 的真实地址在里面。逆向已证实 VisionKit 从卡存储读它（I2 第 5 节）。
 3. 两个设备的 `VkConfigSave` 输出文件：当前参数的完整快照。

@@ -10,9 +10,9 @@
 > | CL 配置有 Medium / Full | ❌ 相机 XML 只有 Base 与 EightyBit；卡端是否支持未知 |
 > | 第 5.2 节"权威清单" | ⚠️ 抄自本仓库 `include/sg3000_regs.h`（当时标为推测），不是独立证据 |
 > | 卡复位默认 4096、按 4096 折叠 | ⚠️ 无依据，是假设 |
-> | JAI ASCII 命令（WN、LR、SBDRT 等）| ⚠️ 资料包里没有出处 |
-> | 串口走 XDMA `\data_0`/`\data_1`、IOCTL 0x220024、分频值 | ⚠️ 资料包里没有出处 |
-> | 卡的 XML `Local:SGCard.xml` 存在卡 Flash | ⚠️ 符合 GenICam 惯例，未核实 |
+> | JAI ASCII 命令（WN、LR、SBDRT 等）| ❌ 2026-11-14 逆向：VisionKit 全部二进制 0 命中，走 GenCP |
+> | 串口走 XDMA `\data_0`/`\data_1`、IOCTL 0x220024、分频值 | ✅ 通道和 IOCTL 经 2026-11-14 逆向证实；❌ 分频"250/50"是毫秒超时，实际按 200 MHz 算（见 `reverse_engineering_2026-11-14.md`）|
+> | 卡的 XML `Local:SGCard.xml` 存在卡 Flash | ✅ 2026-11-14 逆向：DLL 按 `Local:<name>;<addr>;<len>` 从卡存储读，或读本地 SGCard.xml |
 > | 带宽：Base 3-tap 85 MHz 下行消隐仅约 71 个时钟 | ✅ 计算正确 |
 
 # SG3000 采集卡与 JAI SW-WS2-CL16K-50M-SDE (SF6200) 线阵相机硬件接口与采集链路技术规范

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT
  *
- * unit_test.c —— processing / stream 的单元测试（纯计算，不碰硬件）。运行：make -C board test
+ * unit_test.c —— processing / stream / 相机串口的单元测试（不碰硬件）。运行：make -C board test
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -16,6 +16,8 @@
 #include "sg_candidates.h"
 #include "sg_linecheck.h"
 #include "sg_pipeline.h"
+#include "cam_serial.h"
+#include "sg3000_regs.h"
 
 static struct sg_image_view view(unsigned char *p, uint32_t w, uint32_t h)
 {
@@ -136,10 +138,87 @@ static void test_pipeline(void)
     puts("pipeline ok");
 }
 
+/* ---- 相机串口：假串口邮箱 ---- */
+static struct { uint32_t wr_off[64], wr_val[64]; unsigned nwr;
+                uint32_t rx[16]; unsigned nrx, pos; uint32_t rx_len; uint64_t now; } SER;
+static int ser_rd(void *c, uint32_t off, uint32_t *v)
+{
+    (void)c;
+    if (off == SG_SER_RX_OCCUPANCY(1)) *v = SER.pos < SER.nrx;
+    else if (off == SG_SER_RX_LEN(1)) *v = SER.rx_len;
+    else if (off == SG_SER_RX_DATA(1)) { assert(SER.pos < SER.nrx); *v = SER.rx[SER.pos++]; }
+    else return -EINVAL;
+    return 0;
+}
+static int ser_wr(void *c, uint32_t off, uint32_t v)
+{ (void)c; assert(SER.nwr < 64); SER.wr_off[SER.nwr] = off; SER.wr_val[SER.nwr++] = v; return 0; }
+static int ser_dma(void *c, uint32_t s, void *b, uint32_t l, uint32_t t) { (void)c; (void)s; (void)b; (void)l; (void)t; return -EIO; }
+static uint64_t ser_now(void *c) { (void)c; return SER.now; }
+static void ser_sleep(void *c, uint32_t ms) { (void)c; SER.now += ms; }
+
+static void test_cam_serial(void)
+{
+    struct sg_capture_io io = { NULL, ser_rd, ser_wr, ser_dma, ser_now, ser_sleep, NULL };
+    struct sg_capture_session s;
+    struct cam_serial c;
+    const unsigned char msg[5] = { 0x01, 0x00, 0xaa, 0xbb, 0xcc };
+    unsigned char buf[8];
+    uint32_t words[8], d, len, hdr[4] = { 0x000055aau, 0, 3, 0 };
+    unsigned i;
+
+    /* 分频：规则 (200M + 8*baud) / (16*baud) */
+    assert(cam_uart_divisor(115200, &d) == 0 && d == 109);
+    assert(cam_uart_divisor(9600, &d) == 0 && d == 1302);
+    assert(cam_uart_divisor(460800, &d) == 0 && d == 27);
+    assert(cam_uart_divisor(100000, &d) == -EINVAL);
+
+    /* 组包：端口 1 第 1 字 = 0x12，第 2 字 = 长度 | 序号<<16，载荷小端、尾部补 0 */
+    assert(cam_serial_pack(1, 7, msg, 5, words, 8) == 6);
+    assert(words[0] == 0x000155aau && words[1] == 0x12 && words[2] == (5u | 7u << 16) && words[3] == 0);
+    assert(words[4] == 0xbbaa0001u && words[5] == 0xcc);
+    assert(cam_serial_pack(1, 7, msg, 5, words, 5) == -ENOSPC);
+    assert(cam_serial_pack(2, 7, msg, 5, words, 8) == -EINVAL);
+    assert(cam_serial_pack(0, 7, msg, 0, words, 8) == -EINVAL);
+
+    /* 回包头：0x55aa → 取偏移 8；否则 total-16；超长报错 */
+    assert(cam_serial_payload_len(hdr, 20, &len) == 0 && len == 3);
+    hdr[0] = 0; assert(cam_serial_payload_len(hdr, 22, &len) == 0 && len == 6);
+    hdr[0] = 0x55aa; hdr[2] = 9; assert(cam_serial_payload_len(hdr, 20, &len) == -EPROTO);
+    assert(cam_serial_payload_len(hdr, 12, &len) == -EPROTO);
+
+    /* 发送：6 个字写 TX_DATA，最后 TX_LEN = 5 + 16 */
+    assert(sg_capture_session_init(&s, &io) == 0);
+    assert(cam_serial_init(&c, &s, 2) == -EINVAL);
+    assert(cam_serial_init(&c, &s, 1) == 0);
+    assert(cam_serial_send(&c, msg, 5) == 0);
+    assert(SER.nwr == 7);
+    for (i = 0; i < 6; ++i) assert(SER.wr_off[i] == 0x413010u);
+    assert(SER.wr_val[2] == (5u | 1u << 16));
+    assert(SER.wr_off[6] == 0x413014u && SER.wr_val[6] == 21);
+
+    /* 接收：头 + 2 字载荷（有效 5 字节）*/
+    SER.rx[0] = 0x000055aau; SER.rx[1] = 0x12; SER.rx[2] = 5; SER.rx[3] = 0;
+    SER.rx[4] = 0x04030201u; SER.rx[5] = 0x05; SER.nrx = 6; SER.pos = 0; SER.rx_len = 24;
+    assert(cam_serial_recv(&c, buf, sizeof buf, &len, 100) == 0 && len == 5);
+    assert(buf[0] == 1 && buf[3] == 4 && buf[4] == 5 && SER.pos == 6);
+
+    /* 缓冲区太小：整包照样读完，报 -EMSGSIZE */
+    SER.pos = 0;
+    assert(cam_serial_recv(&c, buf, 2, &len, 100) == -EMSGSIZE && len == 5 && SER.pos == 6);
+
+    /* 没有回包：超时 */
+    assert(cam_serial_recv(&c, buf, sizeof buf, &len, 20) == -ETIMEDOUT);
+
+    /* 还没实现的两层必须明确报 -ENOSYS */
+    assert(cam_serial_set_baud(&c, 115200) == -ENOSYS);
+    assert(cam_gencp_read32(&s, 0, &d, 10) == -ENOSYS);
+    puts("cam_serial ok");
+}
+
 int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
-    test_view_stats(); test_candidates(); test_linecheck(); test_pipeline();
+    test_view_stats(); test_candidates(); test_linecheck(); test_pipeline(); test_cam_serial();
     puts("unit: ALL PASS");
     return 0;
 }

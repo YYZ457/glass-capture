@@ -6,14 +6,14 @@
  * 输出：
  *   1. 驱动信息（SG_IOC_INFO）：PCIe 位置、ABI、引擎 ID、对齐要求、poisoned
  *   2. 预检结果：DDR 状态、时钟寄存器（逐位打印）、CL 配置、彩色、位深
- *   3. SG_HDR_READY、SG_ACQ_STATE 的当前值
+ *   3. SG_HDR_READY、SG_ACQ_STATE 的当前值，以及 VisionKit 枚举相机时读的 0x10540010
  * 退出码：0 一切正常；1 预检不通过；2 打不开设备
  *
  * 组装：sg_io_linux（打开设备）→ sg_session → sg_preflight
  * 没有 legacy 来源；可参考 legacy sg3000_capture.c 的 "preflight" 子命令。
  *
  * 这个程序里只有"读"：
- *   - 邮箱读（预检五项）
+ *   - 邮箱读（预检五项 + 0x10540010）
  *   - 直接读两个 BAR0 寄存器（SG_HDR_READY、SG_ACQ_STATE）
  * 没有任何写，也没有启动 DMA。
  *
@@ -28,6 +28,7 @@
 #include "sg_io_linux.h"
 #include "sg_session.h"
 #include "sg_preflight.h"
+#include "sg_mailbox.h"
 #include "sg3000_regs.h"
 #include "sg_err.h"
 
@@ -101,7 +102,7 @@ static void print_preflight(const struct sg_capture_preflight *p, int ret)
 
 /* ---- 3. 两个状态寄存器 ----------------------------------------------- */
 
-static void print_registers(struct sg_capture_session *s)
+static void print_registers(struct sg_capture_session *s, uint32_t timeout_ms)
 {
     uint32_t value;
     int ret;
@@ -121,6 +122,14 @@ static void print_registers(struct sg_capture_session *s)
     } else {
         printf("SG_ACQ_STATE    0x%08x%s\n", value,
                value == SG_ACQ_STATE_STOP ? "   (\"STOP\")" : "");
+    }
+
+    /* VisionKit 枚举相机时读的逻辑地址（[逆向]），只读。0x31 = '1'。 */
+    ret = sg_mbx_read(s, SG_L_CAMERA_ENUM, &value, timeout_ms, 0);
+    if (ret) {
+        printf("camera enum     read failed: %s (%d)\n", strerror(-ret), ret);
+    } else {
+        printf("camera enum     0x%08x   (VisionKit checks for 0x31 '1')\n", value);
     }
 }
 
@@ -168,7 +177,7 @@ int main(int argc, char **argv)
     exit_code = ret ? EXIT_PREFLIGHT : EXIT_OK;
 
     /* 预检失败也照样读这两个寄存器，它们能帮助判断原因。 */
-    print_registers(&session);
+    print_registers(&session, options.control_timeout_ms);
 
     sg_linux_close(&dev);
     return exit_code;

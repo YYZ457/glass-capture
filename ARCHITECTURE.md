@@ -84,7 +84,7 @@ apps ─▶ stream ─▶ processing
 | 文件 | 职责 | 状态 |
 |---|---|---|
 | `cam_regs.h` | 相机寄存器地址 | 🟡 来自同系列 8K 型号 XML，待 16K 确认 |
-| `cam_serial` | GenCP 读写一个寄存器 | ⬜❓ 缺 Linux 下经卡收发串口的方法（唯一没法写的）|
+| `cam_serial` | 串口邮箱收发 + GenCP 读写一个寄存器 | 🟡 收发已写（地址 [逆向]，假卡测过，需新驱动放开白名单）；⬜ 波特率（BAR 未确认）、GenCP（缺 CRC 算法）。见 I7 |
 | `cam_config` | 宽度、行频、曝光、触发、测试图案、User Set | 🟡 已写在 cam_serial 之上；地址待 16K XML 核对 |
 
 ### board/transport/
