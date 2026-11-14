@@ -11,7 +11,7 @@
 | 相机和卡都切 **Base 3 Tap、16384 宽**（B 方案，一根线）| ✅ 采到 16384 × 2000 | 第 10 节 |
 | 停采（读空 `SG_HDR_READY` FIFO 才转 STOP）| ✅ | 第 10.1 节 |
 | 连续采集 `sg3000-stream` 10 kHz | ✅ 能跑，但**只收得动约一半** | 第 10.2、12 节 |
-| DMA 提速 `dma_fast=1` | 🟡 x86 头文件编过，**待 Gemini 编 ARM64 `.ko` 并上板** | I4「DMA 吞吐」 |
+| DMA 提速 `dma_fast=1` | 🟡 Gemini 已用内核树编出 ARM64 `.ko`（`f818b3f`，带 `dma_fast` 参数，vermagic 5.15.19-xilinx-v2022.1），**待上板** | I4「DMA 吞吐」 |
 | 测试图 / 调亮 / 15 kHz | 🟡 命令都写好了，**待上板** | BRINGUP 5⅞、5⁹ |
 | 图偏暗、第 6/7 位从没出现 | ❓ 光不够还是丢位，测试图一拍就知道 | 第 11 节 |
 | 检测方案 | 🟡 设计第 1 版已出：`docs/design/detection_plan.md`。待负责人回答 12 个问题、采购光源和样片 | 本文第 4 节 |
@@ -22,7 +22,7 @@
 
 ## 2. 下次进实验室（一条命令）
 
-1. **Gemini 先在实验室外编好 `.ko`**（不需要硬件）：
+1. **`.ko` 已由 Gemini 编好并提交（`f818b3f`），这一步不用再做。** 以后驱动源码再改时照此重编：
    ```
    KDIR=<内核树> KERNEL_ANALYSIS=<kernel_analysis 目录> CROSS_COMPILE=aarch64-none-elf- sh board/driver/module.sh
    python tools/make_sd_bundle.py --bin-dir dist/glass-capture --ko board/driver/output/module/sg3000_rx.ko
