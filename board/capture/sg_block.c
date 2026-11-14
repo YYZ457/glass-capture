@@ -48,11 +48,13 @@ int sg_block_header_read(struct sg_capture_session *s, uint64_t deadline_ms,
                          struct sg_block_header *h)
 {
     uint32_t ready;
+    uint64_t wait_start;
     unsigned i;
     int ret;
 
     /* ① 等"数据块就绪"，期间检查取消和超时。 */
     s->stage = "wait block header (SG_HDR_READY)";
+    wait_start = s->io.now_ms(s->io.context);
     for (;;) {
         if (sg_session_cancelled(s)) {
             return -ECANCELED;
@@ -70,6 +72,7 @@ int sg_block_header_read(struct sg_capture_session *s, uint64_t deadline_ms,
         }
         s->io.sleep_ms(s->io.context, 1);
     }
+    s->stats.wait_ms += s->io.now_ms(s->io.context) - wait_start;
 
     /* ② 照搬 Windows 的顺序：先"确认"，再依次拷贝各寄存器。 */
     s->stage = "read block header";
@@ -162,8 +165,8 @@ static int dma_payload(struct sg_capture_session *s, const struct sg_capture_opt
         }
         remaining = deadline_ms - now;
 
-        if (length > SG_DMA_CHUNK) {
-            length = SG_DMA_CHUNK;
+        if (length > s->dma_chunk) {
+            length = s->dma_chunk;
         }
         timeout = o->dma_timeout_ms;
         if (remaining < timeout) {
@@ -175,6 +178,8 @@ static int dma_payload(struct sg_capture_session *s, const struct sg_capture_opt
             return ret;
         }
         done += length;
+        s->stats.dma_calls++;
+        s->stats.dma_bytes += length;
     }
     return 0;
 }
@@ -257,7 +262,11 @@ static int receive_packets(struct sg_capture_session *s, const struct sg_capture
 
         /* 把这一包的数据搬进来。 */
         s->stage = "DMA payload";
-        ret = dma_payload(s, o, deadline, h.src_addr, frame->data + filled, h.payload_len);
+        {
+            uint64_t t0 = s->io.now_ms(s->io.context);
+            ret = dma_payload(s, o, deadline, h.src_addr, frame->data + filled, h.payload_len);
+            s->stats.dma_ms += s->io.now_ms(s->io.context) - t0;
+        }
         if (ret) {
             return ret;
         }

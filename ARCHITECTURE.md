@@ -49,6 +49,7 @@ apps ─▶ stream ─▶ processing
 | 文件 | 职责 | 状态 |
 |---|---|---|
 | `sg3000_rx.c` | PCIe 绑定、BAR 映射、寄存器白名单、DMA、出错隔离 | ✅ 2026-11-14 已编译并通过 12382 符号 ABI 检查；实机 `cam_serial=0` 采图与旧驱动一致，`cam_serial=1` 已打通 port0 `camera-probe`；白名单已去掉端口 1（单路卡碰它会 PCIe Slave error），**需重编 .ko**。见 `docs/bringup_report_2026-11-14.md` |
+| `sg3000_rx.c` `dma_fast=1` | 走缓存的 1 MiB 流式 DMA 缓冲区（不再每次 memset）；`/sys/.../dma_stats` 计时 | 🟡 x86 头文件编译通过；待 Gemini 编 ARM64 `.ko` 并上板对比（BRINGUP 5⁹）|
 | `Kbuild`、`module.sh`、`verify_module.py` | 构建 .ko 并检查目标内核 ABI | ✅ 仅改路径 |
 
 ### board/capture/ — 和卡的固件对话（原 `sg3000_capture_core.c` 拆成 5 份）

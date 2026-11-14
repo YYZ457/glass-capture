@@ -172,6 +172,35 @@ python host/console/launch.py
    4. 最根本的还是光源和光圈：目标是背景灰度在 150–200、不饱和。
 3. 把每一步的 `CameraSet ... readback` 行、`CameraValue` 行和图的统计发回来。
 
+## 5⁹. DMA 吞吐与 15 kHz（需要新 `.ko`）
+
+**目标**：15 kHz × 16384 = 246 MB/s 连续不丢块。现在只有约 50–80 MB/s。改动见 I4「DMA 吞吐」。
+
+前提：B 方案已跑通（相机和卡都是 Base 3 Tap、宽 16384）；**网口可以不接**（只看统计，不回传图）。
+
+1. **旧模式基准**（新 `.ko` 不带 `dma_fast`）：
+   ```
+   rmmod sg3000_rx; insmod /tmp/sg3000-board/sg3000_rx.ko cam_serial=1
+   echo 0 > /sys/bus/pci/devices/0000:01:00.0/dma_stats
+   /tmp/sg3000-board/sg3000-stream --source hardware --processor stats --seconds 30 --queue 4 --max-frame-mib 48
+   cat /sys/bus/pci/devices/0000:01:00.0/dma_stats
+   ```
+   记下 `ended` 那一行（`received`、`id_discontinuities`、`dma_ms`、`wait_ms`）和 `dma_stats`。30 秒是为了看卡的缓存会不会被撑爆（会的话 `id_discontinuities` 不为 0）。
+2. **快速模式**：
+   ```
+   rmmod sg3000_rx; insmod /tmp/sg3000-board/sg3000_rx.ko cam_serial=1 dma_fast=1
+   dmesg | tail -3          # 应看到 "fast cached DMA, 1048576-byte transfers"
+   ```
+   重复第 1 步的 stream 和 `cat`。
+3. **快速模式搬的数据对不对**（逐像素验证）：`camera-set TestPattern 3` → `capture --output /tmp/sg3000-console/fast-ramp.pgm --timeout-ms 10000` → 回传 → `python -I verify/V1_testpattern.py fast-ramp.pgm --pattern ramp` 必须有 `MATCH`（和第 5⅞ 节旧模式的结果一致）。记下 `DMAStats ... MBps=` 那一行。最后 `camera-set TestPattern 0`。
+4. **10 kHz 判断**：快速模式下 30 秒 `received` 应约等于 150（10 kHz × 30 s ÷ 2000 行），`id_discontinuities = 0`，`wait_ms` 占大头。
+5. **提到 15 kHz**（只在第 4 步通过后）：
+   - `sg3000-capture camera-set LineRate 15000` → 应显示 `9600 -> 6400`、`CameraValue LineRate = 15000.0 Hz`。被拒绝时它会打印相机允许的行频范围，原样发回来。
+   - 曝光会被限制在一行之内（66.7 µs）：之前设过更长的曝光，先 `camera-set ExposureTime 50`。
+   - 「02½」：`LineRateHz ≈ 15000`。
+   - 重复第 1 步的 30 秒 stream：`received` 约 225，`id_discontinuities = 0`。
+6. 把每一步的 `ended` 行、`dma_stats`、`DMAStats` 行发回来。哪一步不过就停在哪一步。
+
 ## 6. 采到图之后可以马上做的验证（电脑上，不用板子）
 
 ```
@@ -213,5 +242,6 @@ python -I host/detect/candidates.py D:\SG3000_Captures\某张图.pgm --threshold
 5. 如果有：Windows 上 VisionKit 导出的**这台 16K 相机**的 GenICam XML（`cam_regs.h` 现在用的是 8K 型号的地址）
 5½. 16K 宽度实验：改宽度前后两次 `== Card params ==` 全段，以及两张遮半边的图
 5¾. **C2 读到的相机 XML 文件 + C3 的 `camera-regs-*.txt`**；第 5 步失败时的 `FailedStage` / `LastHeader` 几行
+5⁹. **两种 DMA 模式各自的 `ended` 行、`dma_stats`、`DMAStats` 行；15 kHz 的同样三项**
 5⅞. **V1 对测试图的完整输出**（尤其 `bits:` 和 `OR by column %3` 两行）；调亮每一步的 `CameraSet` / `CameraValue` 行和图统计
 6. **「02¾ 读取采集卡 XML」读到的文件**（`D:\SG3000_Captures\card-xml\` 里；`CameraWidth` 的地址在里面，见 I2 第 5 节）

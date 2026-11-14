@@ -68,7 +68,7 @@ static void usage(void)
          "       sg3000-capture camera-regs NAME@ADDR:LEN ... [--device PATH] [--port 0|1] [--baud N]\n"
          "       sg3000-capture camera-set NAME VALUE [--device PATH] [--baud N]   (runtime only, never UserSetSave)\n"
          "         ClConfiguration 0|3, DeviceTapGeometry 2|3 (Base only), TestPattern 0|1|2|3|5,\n"
-         "         ExposureTime <us>, DigitalGain <0.10..15.99>, AnalogGain 0..4 (=1.25/1.75/2/3/4x)\n"
+         "         ExposureTime <us>, DigitalGain <0.10..15.99>, AnalogGain 0..4 (=1.25/1.75/2/3/4x), LineRate <Hz>\n"
          "         other camera commands are read-only; all need insmod sg3000_rx.ko cam_serial=1, default baud 115200\n"
          "       sg3000-capture card-set NAME VALUE [--device PATH]\n"
          "         NAME: CameraWidth CameraHeight DeviceTapGeometry ClConfiguration CameraScanType\n"
@@ -569,6 +569,8 @@ static void print_camera_value(const char *name, uint32_t raw)
         printf("CameraValue ExposureTime = %.2f us\n", raw / (double)CAM16K_SENSOR_MHZ);
     else if (!strcmp(name, "DigitalGain"))
         printf("CameraValue DigitalGain = %.3f x\n", raw / 256.0);
+    else if (!strcmp(name, "LineRate"))
+        printf("CameraValue LineRate = %.1f Hz\n", raw ? CAM16K_SENSOR_MHZ * 1e6 / raw : 0.0);
     else if (!strcmp(name, "AnalogGain")) {
         static const char *g[] = { "1.25", "1.75", "2.0", "3.0", "4.0" };
         printf("CameraValue AnalogGain = %s x\n", raw < 5 ? g[raw] : "?");
@@ -592,7 +594,7 @@ static int camera_set_main(int argc, char **argv)
         if (r <= 0) { usage(); return 2; }
     }
     memset(&st, 0, sizeof st);
-    if (cam_set_check(argv[2], argv[3], &(struct cam_set_state){ 0, CAM16K_MONO8, 0, 1, 0xffffffffu },
+    if (cam_set_check(argv[2], argv[3], &(struct cam_set_state){ 0, CAM16K_MONO8, 0, 1, 0xffffffffu, 1, 0xffffffffu, 0 },
                       &raw, &why) == -EINVAL) {
         usage();   /* 格式就不对（比如 TestPattern abc）：不碰硬件 */
         return 2;
@@ -613,14 +615,21 @@ static int camera_set_main(int argc, char **argv)
         (ret = cam_gencp_read32(&x.ser, CAM16K_BINNING_V, &st.binning_v, CAMERA_TIMEOUT_MS)) ||
         (ret = cam_gencp_read32(&x.ser, CAM16K_EXPOSURE_MIN_CLK, &st.exposure_min_clk, CAMERA_TIMEOUT_MS)) ||
         (ret = cam_gencp_read32(&x.ser, CAM16K_EXPOSURE_MAX_CLK, &st.exposure_max_clk, CAMERA_TIMEOUT_MS)) ||
+        (ret = cam_gencp_read32(&x.ser, CAM16K_LINE_PERIOD_MIN, &st.line_period_min_clk, CAMERA_TIMEOUT_MS)) ||
+        (ret = cam_gencp_read32(&x.ser, CAM16K_LINE_PERIOD_MAX, &st.line_period_max_clk, CAMERA_TIMEOUT_MS)) ||
+        (ret = cam_gencp_read32(&x.ser, CAM16K_LINE_TRIGGER_MODE, &st.line_trigger_mode, CAMERA_TIMEOUT_MS)) ||
         (ret = cam_gencp_read32(&x.ser, addr, &old, CAMERA_TIMEOUT_MS)))
         goto out;
     ret = cam_set_check(argv[2], argv[3], &st, &raw, &why);
     if (ret) {
         fprintf(stderr, "Refused: %s = %s (%s). Camera now: ClConfiguration=%u PixelFormat=0x%08x BinningV=%u "
-                "Exposure range %.2f..%.2f us\n", argv[2], argv[3], why ? why : "not allowed",
+                "Exposure range %.2f..%.2f us, LineRate range %.1f..%.1f Hz, LineTriggerMode=%u\n",
+                argv[2], argv[3], why ? why : "not allowed",
                 st.cl_config, st.pixel_format, st.binning_v,
-                st.exposure_min_clk / (double)CAM16K_SENSOR_MHZ, st.exposure_max_clk / (double)CAM16K_SENSOR_MHZ);
+                st.exposure_min_clk / (double)CAM16K_SENSOR_MHZ, st.exposure_max_clk / (double)CAM16K_SENSOR_MHZ,
+                st.line_period_max_clk ? CAM16K_SENSOR_MHZ * 1e6 / st.line_period_max_clk : 0.0,
+                st.line_period_min_clk ? CAM16K_SENSOR_MHZ * 1e6 / st.line_period_min_clk : 0.0,
+                st.line_trigger_mode);
         goto out;
     }
     if ((ret = cam_gencp_write32(&x.ser, addr, raw, CAMERA_TIMEOUT_MS)) ||
@@ -871,6 +880,11 @@ int main(int argc, char **argv)
                 printf("Saved complete Mono8 frame: %u x %u, %zu bytes, block %u, %u packets: %s\n",
                        result.frame.width, result.frame.height, result.frame.length,
                        result.frame.block_id, result.frame.packets, output);
+                printf("DMAStats chunk=%u transfers=%llu bytes=%llu dma_ms=%llu MBps=%.1f wait_ms=%llu\n",
+                       session.dma_chunk, (unsigned long long)session.stats.dma_calls,
+                       (unsigned long long)session.stats.dma_bytes, (unsigned long long)session.stats.dma_ms,
+                       session.stats.dma_ms ? session.stats.dma_bytes / 1000.0 / session.stats.dma_ms : 0.0,
+                       (unsigned long long)session.stats.wait_ms);
                 fflush(stdout);
                 if (send_to) {
                     ret = send_frame(&result.frame, send_to);   /* 图已经存好；发送失败只影响退出码 */

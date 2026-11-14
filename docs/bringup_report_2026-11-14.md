@@ -370,3 +370,15 @@ VisionKit 读"设备 XML"走的就是 GenCP 标准清单表（BRM `0x1D0` → �
 - **新增**：`camera-set` 放开 `TestPattern`（0/1/2/3/5）、`ExposureTime`（微秒，按相机实时给的上下限检查）、`DigitalGain`（倍）、`AnalogGain`（0..4）。白名单写成纯函数 `cam_set.c`，有单元测试。`V1_testpattern.py` 加了位统计，并支持带偏移的渐变和移动渐变。
 - **`.ko` 进 git**：`.gitignore` 放行 `dist/glass-capture/sg3000_rx.ko`；`make_sd_bundle.py` 不给 `--ko` 时保留已有的 `.ko`；`--bin-dir dist/glass-capture --ko X` 只补驱动、不重编程序。**`.ko` 文件本身要由 Gemini 提交**：Claude 这边没有板子内核树，编不出来。
 - 小更正：相机 XML 的文件名是 `docs/vendor/camera_xml/SF6000V300R001C22XB003.xml`（zip 里解出来的名字），不是 `..._0.0.3.xml`。
+
+---
+
+## 12. 吞吐优化（Claude，同日）：目标 15 kHz
+
+- **目标数据量**：15 kHz × 16384 = 246 MB/s。Base 3 Tap 读一行 64.3 µs < 15 kHz 一行 66.7 µs，**一根线就够**，A 方案不急。
+- **现状**：第 10 节 2 秒流收走 5 块，卡里还压着 5 块 → 只收走一半，约 50–80 MB/s。
+- **改动**（详见 I4「DMA 吞吐」）：
+  - 驱动新参数 `dma_fast`（默认关）：走缓存的 1 MiB 缓冲区 + 手动缓存维护，去掉每次 `memset`，轮询间隔缩短；`dma_stats` 把时间拆成准备 / 等 DMA / 拷贝三段。
+  - 用户态按驱动报的 `max_transfer` 自动决定每次搬多少；`capture` 打印 `DMAStats`，`sg3000-stream` 的 `ended` 多 `dma_ms` / `wait_ms`。
+  - `camera-set LineRate`：按相机实时给的上下限检查（`0x01001020/24`），外触发时锁定。
+- **待办**：Gemini 用板子内核树重编 `.ko`（`module.sh`，ABI 检查要过），替换 `dist/glass-capture/sg3000_rx.ko`，然后上板做 BRINGUP 第 5⁹ 节。**当前 dist 里的 `.ko` 还是上一版（没有 `dma_fast` 参数），其余功能不受影响。**

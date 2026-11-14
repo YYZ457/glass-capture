@@ -163,7 +163,7 @@ static uint16_t be16(const unsigned char *p) { return (uint16_t)(p[0] << 8 | p[1
 
 static void test_cam_serial(void)
 {
-    struct sg_capture_io io = { NULL, ser_rd, ser_wr, ser_dma, ser_now, ser_sleep, NULL };
+    struct sg_capture_io io = { NULL, ser_rd, ser_wr, ser_dma, ser_now, ser_sleep, NULL, 0 };
     struct sg_capture_session s;
     struct cam_serial c;
     const unsigned char msg[5] = { 0x01, 0x00, 0xaa, 0xbb, 0xcc };
@@ -286,8 +286,9 @@ static void test_cam_manifest(void)
 /* camera-set 白名单与换算（纯函数）。值域和锁定条件照 16K 相机 XML。 */
 static void test_cam_set(void)
 {
-    struct cam_set_state base = { 0, CAM16K_MONO8, 0, 96, 9000 };   /* Base、曝光 1..93.75 µs */
-    struct cam_set_state deca = { 3, CAM16K_MONO8, 0, 96, 9000 };
+    /* Base、曝光 1..93.75 µs、行周期 5900..960000 时钟（约 100 Hz..16.27 kHz）、内触发 */
+    struct cam_set_state base = { 0, CAM16K_MONO8, 0, 96, 9000, 5900, 960000, 0 };
+    struct cam_set_state deca = { 3, CAM16K_MONO8, 0, 96, 9000, 5900, 960000, 0 };
     uint32_t raw = 0;
     const char *why;
 
@@ -322,6 +323,15 @@ static void test_cam_set(void)
         struct cam_set_state binned = base;
         binned.binning_v = 2;
         assert(cam_set_check("AnalogGain", "1", &binned, &raw, &why) == -EPERM);   /* SensorBinVerLock */
+    }
+    assert(cam_set_check("LineRate", "10000", &base, &raw, &why) == 0 && raw == 9600);    /* 实测默认 */
+    assert(cam_set_check("LineRate", "15000", &base, &raw, &why) == 0 && raw == 6400);    /* 最终目标 */
+    assert(cam_set_check("LineRate", "20000", &base, &raw, &why) == -EPERM);              /* 超过相机上限 */
+    assert(cam_set_check("LineRate", "50", &base, &raw, &why) == -EPERM);
+    {
+        struct cam_set_state trig = base;
+        trig.line_trigger_mode = 1;
+        assert(cam_set_check("LineRate", "15000", &trig, &raw, &why) == -EPERM);          /* 外触发时锁定 */
     }
     puts("cam set ok");
 }

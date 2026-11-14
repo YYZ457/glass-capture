@@ -16,6 +16,7 @@ uint32_t cam_set_address(const char *name)
         { "ClConfiguration", CAM16K_CL_CONFIG }, { "DeviceTapGeometry", CAM16K_TAP_GEOMETRY },
         { "TestPattern", CAM16K_TEST_PATTERN }, { "ExposureTime", CAM16K_EXPOSURE_CLK },
         { "DigitalGain", CAM16K_DIGITAL_GAIN }, { "AnalogGain", CAM16K_ANALOG_GAIN },
+        { "LineRate", CAM16K_LINE_PERIOD_CLK },
     };
     size_t i;
 
@@ -103,6 +104,23 @@ int cam_set_check(const char *name, const char *text, const struct cam_set_state
         if (v > 4u) { *why = "AnalogGain: 0..4 = 1.25 / 1.75 / 2.0 / 3.0 / 4.0 times"; return -EPERM; }
         if (st->binning_v == 1u || st->binning_v == 2u) {
             *why = "AnalogGain is locked by the camera while BinningV (0x01302040) is 1 or 2";
+            return -EPERM;
+        }
+        break;
+    case CAM16K_LINE_PERIOD_CLK:
+        if (parse_double(text, &d)) return -EINVAL;
+        if (d < 100.0 || d > 200000.0) { *why = "LineRate is in Hz (100 .. 200000)"; return -EPERM; }
+        if (st->line_trigger_mode != 0u) {
+            *why = "LineRate is locked while LineTriggerMode (0x01001004) is on";
+            return -EPERM;
+        }
+        v = (uint32_t)lround(CAM16K_SENSOR_MHZ * 1e6 / d);
+        if (st->line_period_min_clk == 0u || st->line_period_max_clk < st->line_period_min_clk) {
+            *why = "camera did not report a valid line-period range (0x01001020 / 0x01001024)";
+            return -EPERM;
+        }
+        if (v < st->line_period_min_clk || v > st->line_period_max_clk) {
+            *why = "LineRate outside what the camera allows for the current width / CL mode";
             return -EPERM;
         }
         break;

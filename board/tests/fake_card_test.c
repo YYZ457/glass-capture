@@ -16,6 +16,7 @@
 #include "sg_block.h"
 #include "sg_cardxml.h"
 #include "sg3000_regs.h"
+#include "sg3000_rx_uapi.h"
 #include "pgm_write.h"
 #include "sg_err.h"
 
@@ -163,7 +164,7 @@ static int fails;
 #define CHECK(c) do { if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
 
 static void reset(void) { memset(&C, 0, sizeof C); C.block_id = 7; }
-static struct sg_capture_io IO = { NULL, f_read, f_write, f_dma, f_now, f_sleep, f_cancel };
+static struct sg_capture_io IO = { NULL, f_read, f_write, f_dma, f_now, f_sleep, f_cancel, 0 };
 
 int main(void)
 {
@@ -283,6 +284,13 @@ int main(void)
     CHECK(r.frame.width == W && r.frame.height == MAXL && r.frame.length == W * MAXL);
     CHECK(r.frame.block_id == 7 && r.frame.packets == 2 && r.stop_error == 0 && r.start_attempted && r.stop_attempted);
     CHECK(r.primary_stage == NULL && r.stop_stage == NULL);
+    CHECK(s.dma_chunk == SG_DMA_CHUNK && s.stats.dma_bytes == W * MAXL && s.stats.dma_calls == 2);
+    {   /* 每次搬多少由驱动报的 max_transfer 决定；不合理的值退回 64 KiB */
+        struct sg_capture_session s2; struct sg_capture_io io2 = IO;
+        io2.max_dma = SG_DMA_MAX_CHUNK; CHECK(sg_capture_session_init(&s2, &io2) == 0 && s2.dma_chunk == SG_DMA_MAX_CHUNK);
+        io2.max_dma = 4096;             CHECK(sg_capture_session_init(&s2, &io2) == 0 && s2.dma_chunk == SG_DMA_CHUNK);
+        io2.max_dma = 2u << 20;         CHECK(sg_capture_session_init(&s2, &io2) == 0 && s2.dma_chunk == SG_DMA_CHUNK);
+    }
     CHECK(C.started && C.stopped && C.dma_calls == 2 && C.regs_written_bad == 0);
     int ok = 1; for (size_t i = 0; i < r.frame.length; ++i) ok &= r.frame.data[i] == (unsigned char)(0x1000 + i);
     CHECK(ok);

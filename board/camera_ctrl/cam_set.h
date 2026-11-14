@@ -12,6 +12,7 @@
  *   ExposureTime       0x01001010  微秒（可带小数）     µs × 96（SensorClockFrequency）  在相机给的 [0x01001014, 0x01001018] 内（随行频变）
  *   DigitalGain        0x0120604c  倍数 0.10..15.99     倍数 × 256                 —
  *   AnalogGain         0x01001c00  0..4 = 1.25/1.75/2/3/4 倍  同左                   BinningV（0x01302040）不为 1、2（SensorBinVerLock）
+ *   LineRate           0x0100101c  行频 Hz（可带小数）  96e6 / Hz（时钟数）       在相机给的 [0x01001020, 0x01001024] 内；LineTriggerMode（0x01001004）= 0
  *
  * 只改运行时值：从不写 UserSetSave（0x01600318），相机断电恢复 UserSet1。
  */
@@ -30,12 +31,17 @@
 #define CAM16K_DIGITAL_GAIN       0x0120604cu
 #define CAM16K_ANALOG_GAIN        0x01001c00u
 #define CAM16K_BINNING_V          0x01302040u
+#define CAM16K_LINE_PERIOD_CLK    0x0100101cu
+#define CAM16K_LINE_PERIOD_MIN    0x01001020u   /* RO，时钟数，随宽度 / CL 模式 / 时钟变 */
+#define CAM16K_LINE_PERIOD_MAX    0x01001024u   /* RO */
+#define CAM16K_LINE_TRIGGER_MODE  0x01001004u
 #define CAM16K_MONO8              0x01080001u
 #define CAM16K_SENSOR_MHZ         96u
 
 /* 写之前从相机读到的状态（锁定条件和曝光范围要用）。 */
 struct cam_set_state {
     uint32_t cl_config, pixel_format, binning_v, exposure_min_clk, exposure_max_clk;
+    uint32_t line_period_min_clk, line_period_max_clk, line_trigger_mode;
 };
 
 /* 名字 → 地址。不认识的名字返回 0。 */

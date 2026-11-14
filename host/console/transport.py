@@ -32,6 +32,7 @@ STATUS_APP = BOARD_DIR + '/sg_status'
 CARD_XML_DIR = BOARD_DIR + '/card-xml'   # 板上存卡 XML 的目录
 CAMERA_XML_DIR = BOARD_DIR + '/camera-xml'   # 板上存相机 XML 的目录
 CAM_SERIAL_PARAM = '/sys/module/sg3000_rx/parameters/cam_serial'
+DMA_FAST_PARAM = '/sys/module/sg3000_rx/parameters/dma_fast'
 APP_VERSION = 'sg3000-capture 1.0 ABI 1'
 STREAM_VERSION = 'sg3000-stream 0.2 ABI 1'
 
@@ -406,7 +407,9 @@ class Console:
             raise RuntimeError('板上加载的是旧驱动（没有 cam_serial 参数），不能和相机通信。'
                                'SD 卡 glass-capture/ 里放新编译的 sg3000_rx.ko，再做「02 从 SD 加载程序」。')
         self.event('system', '正在以 cam_serial=1 重新加载驱动（只多放开相机串口端口 0，采图行为不变）。')
-        self.run_checked(f"rmmod sg3000_rx && insmod {BOARD_DIR}/sg3000_rx.ko cam_serial=1 && "
+        # 重载时保留 dma_fast（快速 DMA）设置，不然点一下相机按钮就悄悄退回慢速模式
+        self.run_checked(f"fast=$(cat {DMA_FAST_PARAM} 2>/dev/null); "
+                         f"rmmod sg3000_rx && insmod {BOARD_DIR}/sg3000_rx.ko cam_serial=1 $([ \"$fast\" = Y ] && echo dma_fast=1) && "
                          f"test -e {DEV_NODE} && test \"$(cat {CAM_SERIAL_PARAM})\" = Y", 20)
 
     def _camera_probe(self):
@@ -714,7 +717,7 @@ class Console:
     # 和板上 cam_set_check()（board/camera_ctrl/cam_set.c）一致；锁定条件和曝光上下限由板上按相机当前状态再查一次。
     CAMERA_SET_INTS = {'ClConfiguration': (0, 3), 'DeviceTapGeometry': (2, 3),
                        'TestPattern': (0, 1, 2, 3, 5), 'AnalogGain': (0, 1, 2, 3, 4)}
-    CAMERA_SET_FLOATS = {'ExposureTime': (0.0, 100000.0), 'DigitalGain': (0.10, 15.99)}
+    CAMERA_SET_FLOATS = {'ExposureTime': (0.0, 100000.0), 'DigitalGain': (0.10, 15.99), 'LineRate': (100.0, 200000.0)}
 
     @classmethod
     def _check_camera_set(cls, options):
@@ -726,7 +729,7 @@ class Console:
             if (lo < value if name == 'ExposureTime' else lo <= value) and value <= hi:
                 return dict(name=name, value=value, text=f'{value:g}')
         raise ValueError('相机参数不在允许范围：ClConfiguration 0/3，DeviceTapGeometry 2/3（仅 Base），'
-                         'TestPattern 0/1/2/3/5，ExposureTime 微秒，DigitalGain 0.10–15.99，AnalogGain 0–4。')
+                         'TestPattern 0/1/2/3/5，ExposureTime 微秒，DigitalGain 0.10–15.99，AnalogGain 0–4，LineRate 100–200000 Hz。')
 
     def _camera_set(self):
         """写相机的 Camera Link 输出模式（不保存，相机断电恢复）。写后读回核对。"""

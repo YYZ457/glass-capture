@@ -4,7 +4,8 @@
 #include <linux/types.h>
 #include <linux/ioctl.h>
 #define SG_ABI_VERSION 1
-#define SG_DMA_CHUNK 65536u
+#define SG_DMA_CHUNK 65536u            /* every driver accepts this per transfer */
+#define SG_DMA_MAX_CHUNK (1u << 20)     /* dma_fast=1 drivers report this in sg_info.max_transfer */
 struct sg_info {
     __u32 abi, vendor, device, domain, bus, devfn;
     __u32 engine_id, address_alignment, length_granularity, address_bits;

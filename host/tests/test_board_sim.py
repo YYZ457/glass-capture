@@ -310,6 +310,8 @@ def test_camera_set_and_two_cable_hint(board):
                     "echo 'CameraValue ExposureTime = 80.50 us'\n")
     job = run(console, "camera_set", {"name": "ExposureTime", "value": 80.5})
     assert job["status"] == "success" and "80.50 us" in job["message"], job
+    with pytest.raises(ValueError):
+        console.start("camera_set", {"name": "LineRate", "value": 50})
 
     status = tmp / "board" / "sg_status"
     status.write_text("#!/bin/bash\necho 'DDR status      2'\necho 'pixel clocks    0x00000019'\n"

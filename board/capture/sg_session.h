@@ -29,6 +29,12 @@ struct sg_capture_session {
     /* 诊断用：最近一条邮箱回复的前 64 字节（出错时打印出来对照），不参与任何判断 */
     unsigned char last_reply[64];
     uint32_t last_reply_len;       /* 回复的完整字节数 */
+    uint32_t dma_chunk;            /* 每次 DMA 最多搬多少字节，init 时按 io.max_dma 定 */
+    /* 吞吐统计（只累加，不参与判断）：DMA 花了多久、等卡出数据花了多久。
+     * wait_ms 接近 0 而 dma_ms 很大 = DMA 跟不上相机；反过来 = 板子在等相机。 */
+    struct {
+        uint64_t dma_bytes, dma_calls, dma_ms, wait_ms;
+    } stats;
     /* 诊断用：采集走到了哪一步、最近一个块头的关键字段。出错时打印，不参与任何判断。 */
     const char *stage;
     struct {

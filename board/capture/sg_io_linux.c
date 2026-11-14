@@ -166,7 +166,7 @@ int sg_linux_open(struct sg_linux_dev *d, const char *device, volatile sig_atomi
         info->vendor != SG_PCI_VENDOR ||
         info->device != SG_PCI_DEVICE ||
         info->poisoned ||                           /* 驱动已把卡隔离，不能再用 */
-        info->max_transfer < SG_DMA_CHUNK ||
+        info->max_transfer < SG_DMA_CHUNK ||       /* 每个驱动至少支持 64 KiB */
         (info->engine_id >> 16) != ENGINE_ID_HIGH ||
         (info->engine_id & ENGINE_ID_LOW_MASK)) {
         ret = -ENODEV;
@@ -205,4 +205,6 @@ void sg_linux_io(struct sg_linux_dev *d, struct sg_capture_io *io)
     io->now_ms    = linux_now_ms;
     io->sleep_ms  = linux_sleep_ms;
     io->cancelled = linux_cancelled;
+    /* 驱动说一次能搬多少就搬多少（dma_fast=1 是 1 MiB），但不超过本程序认识的上限 */
+    io->max_dma   = d->info.max_transfer < SG_DMA_MAX_CHUNK ? d->info.max_transfer : SG_DMA_MAX_CHUNK;
 }

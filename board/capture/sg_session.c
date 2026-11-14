@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include "sg_session.h"
+#include "sg3000_rx_uapi.h"     /* SG_DMA_CHUNK / SG_DMA_MAX_CHUNK */
 #include "sg_err.h"
 
 /* ---- 三个小工具：把 s->io 回调表的调用包短一点 ---------------------- */
@@ -65,6 +66,7 @@ int sg_capture_session_init(struct sg_capture_session *s, const struct sg_captur
 
     memset(s, 0, sizeof(*s));   /* request_id、last_ack、have_ack 都从 0 开始 */
     s->io = *io;                /* 拷贝整张回调表（不是保存指针） */
+    s->dma_chunk = io->max_dma >= SG_DMA_CHUNK && io->max_dma <= SG_DMA_MAX_CHUNK ? io->max_dma : SG_DMA_CHUNK;
     return 0;
 }
 

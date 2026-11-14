@@ -401,12 +401,16 @@ done:
              "\"stop_error\":%d,\"cancelled\":%s,\"received\":\"%" PRIu64 "\","
              "\"processed\":\"%" PRIu64 "\",\"bytes\":\"%" PRIu64 "\","
              "\"id_discontinuities\":\"%" PRIu64 "\",\"queue_full_events\":\"%" PRIu64 "\","
-             "\"queue_peak\":%u,\"elapsed_ms\":\"%" PRIu64 "\"}\n",
+             "\"queue_peak\":%u,\"elapsed_ms\":\"%" PRIu64 "\","
+             "\"dma_chunk\":%u,\"dma_bytes\":\"%" PRIu64 "\",\"dma_ms\":\"%" PRIu64 "\","
+             "\"wait_ms\":\"%" PRIu64 "\"}\n",
              source_name, processor_name, ret, stats.source_error, stats.processing_error,
              stats.output_error, stats.stop_error, stats.cancelled ? "true" : "false",
              stats.received, stats.processed, stats.bytes, stats.id_discontinuities,
              stats.queue_full_events, stats.queue_peak,
-             (stats.finished_ns - stats.started_ns) / 1000000u);
+             (stats.finished_ns - stats.started_ns) / 1000000u,
+             hardware.session.dma_chunk, hardware.session.stats.dma_bytes,
+             hardware.session.stats.dma_ms, hardware.session.stats.wait_ms);
     e = tx_jsonl_emit(line, 2000);
     if (!ret) {
         ret = e;

@@ -23,13 +23,16 @@ struct sg_capture_io {
     /* BAR0 寄存器读写，offset 见 sg3000_regs.h 的 A 类 */
     int (*read_reg)(void *ctx, uint32_t offset, uint32_t *value);
     int (*write_reg)(void *ctx, uint32_t offset, uint32_t value);
-    /* 从卡上 DDR 的 source 地址搬 length 字节到 buffer，length <= SG_DMA_CHUNK */
+    /* 从卡上 DDR 的 source 地址搬 length 字节到 buffer，length <= max_dma */
     int (*dma_read)(void *ctx, uint32_t source, void *buffer, uint32_t length,
                     uint32_t timeout_ms);
     uint64_t (*now_ms)(void *ctx);
     void (*sleep_ms)(void *ctx, uint32_t ms);
     /* 可为 NULL；返回非 0 表示用户要求中止（Ctrl+C） */
     int (*cancelled)(void *ctx);
+    /* 驱动每次最多搬多少字节（sg_info.max_transfer）。0 = 按 SG_DMA_CHUNK（64 KiB，所有驱动都支持）。
+     * dma_fast=1 的驱动报 SG_DMA_MAX_CHUNK（1 MiB）。 */
+    uint32_t max_dma;
 };
 
 #endif

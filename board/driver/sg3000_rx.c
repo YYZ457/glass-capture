@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Experimental SG3000 port-0 receiver. No IRQ, mmap or user-page DMA.
+ * dma_fast=1 (default off): DMA into a cached, streaming-mapped 1 MiB buffer with
+ * explicit cache maintenance instead of a 64 KiB coherent one; see docs/interfaces/I4 (DMA throughput).
  * XDMA layout checked against pinned Xilinx dma_ip_drivers and supplied driver.
  * All DMA addresses come from Linux DMA APIs. Coherent storage is retained if
  * engine quiescence cannot be established; this intentionally requires reboot.
@@ -17,6 +19,9 @@
 #include <linux/slab.h>
 #include <linux/iopoll.h>
 #include <linux/sched/signal.h>
+#include <linux/gfp.h>
+#include <linux/ktime.h>
+#include <linux/sysfs.h>
 #include "sg3000_rx_uapi.h"
 
 #define C2H 0x1000
@@ -42,9 +47,20 @@ struct sg_dev {
     void *data;
     __le32 *wb;
     struct sg_info info;
+    /* dma_fast: cached buffer, streaming DMA mapping (NULL when dma_fast is off) */
+    struct page *fpage;
+    void *fdata;
+    dma_addr_t fbus;
+    unsigned int forder;
+    /* timing, read and reset through /sys/bus/pci/devices/<bdf>/dma_stats */
+    u64 st_transfers, st_bytes, st_prep_ns, st_wait_ns, st_copy_ns, st_errors;
     bool gone, quarantined;
     char name[48];
 };
+
+static bool dma_fast;
+module_param(dma_fast, bool, 0444);
+MODULE_PARM_DESC(dma_fast, "Cached 1 MiB streaming DMA buffer instead of 64 KiB coherent one (default off)");
 
 static u32 sg_status(struct sg_dev *d) { return readl(d->bar1 + C2H + 0x40); }
 static bool sg_idle(struct sg_dev *d)
@@ -78,7 +94,11 @@ static void sg_free_dma(struct sg_dev *d)
     if (d->desc) dma_free_coherent(&d->pdev->dev, PAGE_SIZE, d->desc, d->desc_bus);
     if (d->wb) dma_free_coherent(&d->pdev->dev, PAGE_SIZE, d->wb, d->wb_bus);
     if (d->data) dma_free_coherent(&d->pdev->dev, BUFFER_BYTES, d->data, d->data_bus);
-    d->desc = NULL; d->wb = NULL; d->data = NULL;
+    if (d->fpage) {
+        dma_unmap_page(&d->pdev->dev, d->fbus, PAGE_SIZE << d->forder, DMA_FROM_DEVICE);
+        __free_pages(d->fpage, d->forder);
+    }
+    d->desc = NULL; d->wb = NULL; d->data = NULL; d->fpage = NULL; d->fdata = NULL;
 }
 
 static void sg_release(struct kref *ref)
@@ -155,17 +175,25 @@ static int sg_dma_read(struct sg_dev *d, struct sg_dma *x)
     unsigned long end;
     int ret = 0;
     dma_addr_t destination;
-    if (!x->length || x->length > SG_DMA_CHUNK || x->source > U32_MAX ||
+    bool fast = d->fdata != NULL;
+    void *buf = fast ? d->fdata : d->data;
+    dma_addr_t bus = fast ? d->fbus : d->data_bus;
+    u64 t0, t1, t2;
+    if (!x->length || x->length > d->info.max_transfer || x->source > U32_MAX ||
         x->source + x->length > (1ULL << 32) || !x->timeout_ms || x->timeout_ms > 2000)
         return -EINVAL;
     if (!access_ok(u64_to_user_ptr(x->buffer), x->length)) return -EFAULT;
     if (d->info.poisoned) return -EIO;
     if (!sg_idle(d)) { sg_quarantine(d); return -EIO; }
 
+    t0 = ktime_get_ns();
     /* MM incremental mode: source and destination low alignment bits match. */
-    offset = ((u32)x->source - (u32)d->data_bus) & (d->info.address_alignment - 1);
-    destination = d->data_bus + offset;
-    memset(d->data + offset, 0, x->length);
+    offset = ((u32)x->source - (u32)bus) & (d->info.address_alignment - 1);
+    destination = bus + offset;
+    if (fast)   /* hand the buffer to the device; it was zeroed at probe and only ever holds our DMA data */
+        dma_sync_single_for_device(&d->pdev->dev, destination, x->length, DMA_FROM_DEVICE);
+    else
+        memset(d->data + offset, 0, x->length);
     memset(d->desc, 0, sizeof(*d->desc));
     d->desc->control = cpu_to_le32(0xad4b0003); /* Observed Windows MM last descriptor. */
     d->desc->bytes = cpu_to_le32(x->length);
@@ -184,6 +212,7 @@ static int sg_dma_read(struct sg_dev *d, struct sg_dma *x)
     writel(0, d->bar1 + SG_DESC + 0x88);
     writel(CTRL_ERRORS | CTRL_POLL | 1u, d->bar1 + C2H + 4);
     readl(d->bar1 + C2H + 0x40);
+    t1 = ktime_get_ns();
     end = jiffies + msecs_to_jiffies(x->timeout_ms);
     for (;;) {
         wb = le32_to_cpu(READ_ONCE(*d->wb));
@@ -193,7 +222,7 @@ static int sg_dma_read(struct sg_dev *d, struct sg_dma *x)
         if ((wb & WB_COUNT) > 1) { ret = -EPROTO; break; }
         if (signal_pending(current)) { ret = -EINTR; break; }
         if (time_after_eq(jiffies, end)) { ret = -ETIMEDOUT; break; }
-        usleep_range(50, 100);
+        if (fast) usleep_range(10, 20); else usleep_range(50, 100);
     }
     x->status = status; x->completed = wb;
     if (!sg_idle(d)) { sg_quarantine(d); return -EIO; }
@@ -201,8 +230,62 @@ static int sg_dma_read(struct sg_dev *d, struct sg_dma *x)
     x->status = status;
     if (status == U32_MAX || (status & ST_ERRORS)) ret = -EIO;
     dma_rmb();
-    if (!ret && copy_to_user(u64_to_user_ptr(x->buffer), d->data + offset, x->length)) ret = -EFAULT;
+    t2 = ktime_get_ns();
+    if (!ret && fast)
+        dma_sync_single_for_cpu(&d->pdev->dev, destination, x->length, DMA_FROM_DEVICE);
+    if (!ret && copy_to_user(u64_to_user_ptr(x->buffer), buf + offset, x->length)) ret = -EFAULT;
+    if (ret) {
+        d->st_errors++;
+    } else {
+        d->st_transfers++;
+        d->st_bytes += x->length;
+        d->st_prep_ns += t1 - t0;
+        d->st_wait_ns += t2 - t1;
+        d->st_copy_ns += ktime_get_ns() - t2;
+    }
     return ret;
+}
+
+/* /sys/bus/pci/devices/<bdf>/dma_stats: read = counters, write anything = reset. */
+static ssize_t dma_stats_show(struct device *dev, struct device_attribute *attr, char *out)
+{
+    struct sg_dev *d = dev_get_drvdata(dev);
+    ssize_t n;
+    mutex_lock(&d->lock);
+    n = sysfs_emit(out, "mode=%s max_transfer=%u transfers=%llu bytes=%llu prep_us=%llu wait_us=%llu copy_us=%llu errors=%llu\n",
+                   d->fdata ? "fast" : "coherent", d->info.max_transfer, d->st_transfers, d->st_bytes,
+                   d->st_prep_ns / 1000, d->st_wait_ns / 1000, d->st_copy_ns / 1000, d->st_errors);
+    mutex_unlock(&d->lock);
+    return n;
+}
+static ssize_t dma_stats_store(struct device *dev, struct device_attribute *attr, const char *in, size_t len)
+{
+    struct sg_dev *d = dev_get_drvdata(dev);
+    mutex_lock(&d->lock);
+    d->st_transfers = d->st_bytes = d->st_prep_ns = d->st_wait_ns = d->st_copy_ns = d->st_errors = 0;
+    mutex_unlock(&d->lock);
+    return len;
+}
+static DEVICE_ATTR_RW(dma_stats);
+
+/* dma_fast: one physically contiguous, zeroed, cached buffer mapped for the device once. */
+static void sg_alloc_fast(struct sg_dev *d)
+{
+    unsigned int order = get_order(SG_DMA_MAX_CHUNK + PAGE_SIZE);
+    struct page *page = alloc_pages(GFP_KERNEL | __GFP_ZERO | __GFP_NOWARN, order);
+    dma_addr_t bus;
+    if (!page) {
+        dev_warn(&d->pdev->dev, "dma_fast: no %lu-byte buffer, using the 64 KiB coherent path\n", PAGE_SIZE << order);
+        return;
+    }
+    bus = dma_map_page(&d->pdev->dev, page, 0, PAGE_SIZE << order, DMA_FROM_DEVICE);
+    if (dma_mapping_error(&d->pdev->dev, bus)) {
+        __free_pages(page, order);
+        dev_warn(&d->pdev->dev, "dma_fast: mapping failed, using the 64 KiB coherent path\n");
+        return;
+    }
+    d->fpage = page; d->fdata = page_address(page); d->fbus = bus; d->forder = order;
+    d->info.max_transfer = SG_DMA_MAX_CHUNK;
 }
 
 static long sg_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
@@ -318,13 +401,17 @@ static int sg_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     d->wb = dma_alloc_coherent(&pdev->dev, PAGE_SIZE, &d->wb_bus, GFP_KERNEL);
     d->data = dma_alloc_coherent(&pdev->dev, BUFFER_BYTES, &d->data_bus, GFP_KERNEL);
     if (!d->desc || !d->wb || !d->data) { ret = -ENOMEM; goto unmap; }
+    if (dma_fast) sg_alloc_fast(d);
     pci_set_master(pdev); pci_intx(pdev, 0);
     snprintf(d->name, sizeof(d->name), "sg3000_rx_%s", pci_name(pdev));
     d->misc = (struct miscdevice){ .minor = MISC_DYNAMIC_MINOR, .name = d->name,
         .fops = &sg_fops, .parent = &pdev->dev, .mode = 0600 };
     ret = misc_register(&d->misc); if (ret) { pci_clear_master(pdev); goto unmap; }
     pci_set_drvdata(pdev, d);
-    dev_info(&pdev->dev, "port0 C2H MM receiver ready at /dev/%s (experimental)\n", d->name);
+    if (device_create_file(&pdev->dev, &dev_attr_dma_stats))
+        dev_warn(&pdev->dev, "dma_stats sysfs file not created\n");
+    dev_info(&pdev->dev, "port0 C2H MM receiver ready at /dev/%s (experimental, %s DMA, %u-byte transfers)\n",
+             d->name, d->fdata ? "fast cached" : "coherent", d->info.max_transfer);
     return 0;
 unmap:
     if (d->bar1) pci_iounmap(pdev, d->bar1);
@@ -340,6 +427,7 @@ disable:
 static void sg_remove(struct pci_dev *pdev)
 {
     struct sg_dev *d = pci_get_drvdata(pdev);
+    device_remove_file(&pdev->dev, &dev_attr_dma_stats);
     misc_deregister(&d->misc);
     mutex_lock(&d->lock);
     d->gone = true;
