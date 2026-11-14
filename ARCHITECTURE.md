@@ -48,7 +48,7 @@ apps ─▶ stream ─▶ processing
 
 | 文件 | 职责 | 状态 |
 |---|---|---|
-| `sg3000_rx.c` | PCIe 绑定、BAR 映射、寄存器白名单、DMA、出错隔离 | ✅ 原样迁入；2026-11-14 加相机串口白名单，**默认关闭**（`insmod ... cam_serial=1` 才放开）。新 .ko 还没编译（缺板子内核树），白名单逻辑电脑上单独测过 |
+| `sg3000_rx.c` | PCIe 绑定、BAR 映射、寄存器白名单、DMA、出错隔离 | ✅ 2026-11-14 已编译并通过 12382 符号 ABI 检查；实机 `cam_serial=0` 采图与旧驱动一致，`cam_serial=1` 已打通 port0 `camera-probe`（⚠️ 单路卡测 `--port 1` 会触发 PCIe Slave error，待加拦截）。见 `docs/bringup_report_2026-11-14.md` |
 | `Kbuild`、`module.sh`、`verify_module.py` | 构建 .ko 并检查目标内核 ABI | ✅ 仅改路径 |
 
 ### board/capture/ — 和卡的固件对话（原 `sg3000_capture_core.c` 拆成 5 份）
@@ -56,7 +56,7 @@ apps ─▶ stream ─▶ processing
 | 文件 | 职责 | 状态 |
 |---|---|---|
 | `sg_session` | 会话、超时参数、读写小工具、帧释放 | ✅ 实机单帧与读 XML 验证通过 |
-| `sg_mailbox` | 邮箱报文收发 | ✅ 实机验证通过（严格寄存器读 + 存储块读 `sg_mbx_read_block`）；🟡 卡参数写 `sg_mbx_write_value`（5 个参数白名单）未上板 |
+| `sg_mailbox` | 邮箱报文收发 | ✅ 实机验证通过（严格寄存器读 + 存储块读 `sg_mbx_read_block` + 卡参数写 `sg_mbx_write_value`：`CameraWidth` `4096 -> 16384` 读回一致且断电恢复默认） |
 | `sg_preflight` | 只读体检 | ✅ 实机验证通过 |
 | `sg_block` | 块头读取、校验（纯函数）、分块 DMA | ✅ 实机单帧采集验证通过 |
 | `sg_acq` | 开始 / 取块 / 停止状态机，单帧便捷函数 | ✅ 实机单帧采集验证通过 |
@@ -85,7 +85,7 @@ apps ─▶ stream ─▶ processing
 | 文件 | 职责 | 状态 |
 |---|---|---|
 | `cam_regs.h` | 相机寄存器地址 | 🟡 来自同系列 8K 型号 XML，待 16K 确认 |
-| `cam_serial` | 串口邮箱初始化 / 收发 / 波特率 + GenCP 读写 | 🟡 全部照反汇编写完（[逆向]），纯函数和收发有测试；需新驱动 `cam_serial=1`。见 I7 |
+| `cam_serial` | 串口邮箱初始化 / 收发 / 波特率 + GenCP 读写 | ✅ 实机 `cam_serial=1` + `port=0, baud=115200` 读出 `JAI / SW-WS2-CL16K-50M-SDE`；单路卡禁碰 port1（见 `docs/bringup_report_2026-11-14.md`） |
 | `cam_config` | 宽度、行频、曝光、触发、测试图案、User Set | 🟡 已写在 cam_serial 之上；地址待 16K XML 核对 |
 
 ### board/transport/
@@ -100,7 +100,7 @@ apps ─▶ stream ─▶ processing
 | 文件 | 程序 | 状态 |
 |---|---|---|
 | `sg_status.c` | `sg_status` 只读体检；`--card-xml DIR` 读卡 XML | ✅ 实机体检与 `--card-xml` 读出均通过 |
-| `sg_capture_main.c` | `sg3000-capture` 单帧；`send` 经网口发图；`card-set` 写卡参数（白名单 + 读回）；`camera-probe` 经串口读相机型号；`version` | ✅ `preflight` / `capture`（4096×2000）/ `version` 实机通过；`send` 和 `camera-probe` 待测 |
+| `sg_capture_main.c` | `sg3000-capture` 单帧；`send` 经网口发图；`card-set` 写卡参数（白名单 + 读回）；`camera-probe` 经串口读相机型号；`version` | ✅ `preflight` / `capture`（4096×2000）/ `version` / `card-set` / `camera-probe`（port0）实机已跑；16384 宽度下 `capture` 约 2s `-110` 超时；`send` 待测 |
 | `sg_stream_main.c` | `sg3000-stream` 连续；`--processor candidates`、`--tcp` | 🟡 已迁移，合成源跑通；硬件源没上板 |
 | `pgm_write` | 原子写 PGM | 🟡 已写，电脑上测试通过 |
 
@@ -115,7 +115,7 @@ apps ─▶ stream ─▶ processing
 | `verify/V1-V4` | 测试图案、行完整性、暗场、真值比对 | 🟡 已写，合成图测过；V1 渐变公式待手册确认 |
 | `board/tests/` | 假卡测试、单元测试（`make -C board test`，x86 和 ARM64 模拟器都过）| 🟡 |
 | `tools/make_sd_bundle.py` | 交叉编译 → `dist/glass-capture/`（拷到 SD 卡）| 🟡 |
-| `dist/glass-capture/` | 编译好的 ARM64 板上程序 + SHA256SUMS | 🟡 没上板 |
+| `dist/glass-capture/` | 编译好的 ARM64 板上程序 + SHA256SUMS | ✅ 已上板校验并运行（`00d0718`） |
 | `docs/BRINGUP.md` | 上板步骤 | — |
 | `platform/` | 启动文件 | ⚠️ 只在 SD 卡上 |
 | `legacy/` | 原始代码，只读，迁移参照 | ✅ 仍可编译 |

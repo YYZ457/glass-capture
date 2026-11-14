@@ -130,20 +130,16 @@ KDIR=<准备好的内核树> KERNEL_ANALYSIS=<kernel_analysis 目录> CROSS_COMP
 - 必须看到 `Compile and target ABI checks passed.`；ABI 检查不过，就不要上板。
 - 打包：`python tools/make_sd_bundle.py --ko board/driver/output/module/sg3000_rx.ko`。这样 `.ko` 会进 `dist/glass-capture/` 和 `SHA256SUMS`，中控台会优先加载它。
 
-### 8.2 上板：先确认新驱动和旧驱动行为一样，再开串口
+### 8.2 上板实测结果（2026-11-14，详见 `docs/bringup_report_2026-11-14.md`）
 
-1. **新驱动不带参数**：照常 02 → 02½ → 04。结果必须和旧驱动完全一样（`poisoned 0`，采到图）。这一步不过，就停下。
-2. **开串口白名单**（串口终端里手动敲，三条命令依次执行）：
-   - `rmmod sg3000_rx`
-   - `insmod /tmp/sg3000-board/sg3000_rx.ko cam_serial=1`
-   - `cat /sys/module/sg3000_rx/parameters/cam_serial`，应该输出 `Y`
-3. 运行 `/tmp/sg3000-board/sg3000-capture camera-probe`。成功会打印 `CameraManufacturer=…` 和 `CameraModel=…`。
-4. 读不出时依次换参数再试：`--baud 115200`、`--baud 460800`、`--port 1`。每次的完整输出都记下来。
-5. 恢复：重启板子即可。或者先 `rmmod`，再不带参数 `insmod`。
+1. **新驱动不带参数**：✅ 通过。`02 → 02½ → 03 → 04` 正常采到 `4096 × 2000` 帧（8,192,000 B），与旧驱动一致。
+2. **开串口白名单**：✅ `cam_serial=1` 加载后 `/sys/module/sg3000_rx/parameters/cam_serial == Y`。
+3. **`camera-probe`**：✅ `--baud 115200`（`port=0`）读出 `CameraManufacturer=JAI`、`CameraModel=SW-WS2-CL16K-50M-SDE`。
+4. **其他参数测试与硬件注意**：`9600` 返回 `-110`，`19200 / 38400 / 57600 / 460800` 返回 `-71`；**在当前单路卡（`camera enum = 0x30424630`）上运行 `--port 1` 会触发 `nwl-pcie: Slave error` / `synchronous external abort` 导致系统异常**，在加驱动/应用端拦截前切勿探测 `--port 1`。
+5. 恢复：重启板子即可（或 `rmmod sg3000_rx && insmod /tmp/sg3000-board/sg3000_rx.ko`）。
 
 ### 8.3 之后
 
-- [ ] 16K 相机的 XML。两条路：
-  - Windows 上用 VisionKit 连一次相机，然后全盘搜当天修改过的 `SchemaVersion*` 文件；
-  - GenCP 通了以后，从相机本身读出来（GenCP 清单表，到时再写）。
+- [ ] 16K 相机的 XML：Windows 上确认无实连缓存 XML（本地从未插过 PCIe 采集卡），下一步改为通过 `cam_serial=1` GenCP 从相机本身读取 XML（GenCP 清单表）。
 - [ ] 用 16K XML 核对 `cam_regs.h`，再启用 `cam_config`。
+- [ ] 在 `sg3000_rx.c` / `camera-probe` 中按 `camera enum` 拦截单路卡对 `port 1` 的访问。
