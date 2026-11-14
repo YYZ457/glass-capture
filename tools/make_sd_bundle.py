@@ -7,6 +7,9 @@
   python tools/make_sd_bundle.py                        # 交叉编译（需要 aarch64-linux-gnu-gcc）→ dist/glass-capture/
   python tools/make_sd_bundle.py --bin-dir DIR          # 不编译，直接用 DIR 里现成的三个程序
   python tools/make_sd_bundle.py --ko path/sg3000_rx.ko # 顺便带上驱动
+  python tools/make_sd_bundle.py --bin-dir dist/glass-capture --ko path/sg3000_rx.ko
+                                                        # 只补/换驱动，程序原样保留（不重编）
+不给 --ko 时，dist/glass-capture/ 里已有的 sg3000_rx.ko 会原样保留（它进 git，见 .gitignore）。
 然后把 dist/glass-capture 整个文件夹拷到 SD 卡第一个分区的根目录。
 """
 import argparse
@@ -53,16 +56,22 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     bin_dir = args.bin_dir or build(REPO / "board" / "out-arm64")
+    # 先把要用的文件全部读进内存：--bin-dir 可以就是输出目录本身，删目录前不能丢
+    blobs = {name: (bin_dir / name).read_bytes() for name in PROGRAMS}
+    ko = args.ko if args.ko else args.out / "sg3000_rx.ko"
+    if ko.exists():
+        blobs["sg3000_rx.ko"] = ko.read_bytes()
+    elif args.ko:
+        raise SystemExit(f"--ko {args.ko} does not exist")
     if args.out.exists():
         shutil.rmtree(args.out)
     args.out.mkdir(parents=True)
 
-    files = list(PROGRAMS)
-    for name in PROGRAMS:
-        shutil.copy2(bin_dir / name, args.out / name)
-    if args.ko:
-        shutil.copy2(args.ko, args.out / "sg3000_rx.ko")
-        files.append("sg3000_rx.ko")
+    files = list(blobs)
+    for name, data in blobs.items():
+        (args.out / name).write_bytes(data)
+        if name in PROGRAMS:
+            (args.out / name).chmod(0o755)
 
     sums = []
     for name in files:

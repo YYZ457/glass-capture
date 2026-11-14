@@ -149,6 +149,29 @@ python host/console/launch.py
 - 失败时把 `FailedStage` / `StopFailedStage` / `LastHeader` 三行和「02½」全文原样发回来。
 - 只用这些写操作：卡 `card-set`（5 个参数）、相机 `camera-set`（2 个参数）。其余全部只读。
 
+## 5⅞. 测试图验证位映射 + 调亮（B 方案跑通之后）
+
+**2026-11-14 结果**：B 方案（相机和卡都 Base 3 Tap，宽 16384）采图、连续流都通过（实测报告第 10 节）。
+但图很暗（明暗场景最大值 14），强光下按位或也只有 `0x3f`：**第 6、7 位从没出现过**。是光不够，还是链路丢了最高两位，看实拍图分不清。
+
+前提：已按第 5¾ 节 B 方案把相机切成 Base / 3 Tap、卡宽度 16384，「02½」通过。所有 `camera-set` 都只改运行时值，相机断电恢复。
+
+1. **测试图（先做，判断位映射）**：
+   1. `sg3000-capture camera-set TestPattern 3`（水平灰度渐变）。中控台：「写入相机」选 `TestPattern`、填 `3`。
+   2. 采一帧，回传电脑，然后运行：`python -I verify/V1_testpattern.py 图.pgm --pattern ramp`
+   3. 看 `bits:` 那一行：
+      - `missing=[]`，并且某个公式显示 `MATCH` → **链路完全正确**，暗只是光的问题，接着做第 2 步。
+      - `missing=[6, 7]` → **最高两位在相机→卡这段丢了**。停下，把 V1 的完整输出和 `OR by column %3` 那一行发回来。
+      - 都不 MATCH，但 8 位都在 → 把 `first row[:16]` 发回来（公式和猜的不一样）。
+   4. 可选：`camera-set TestPattern 1`（全黑）、`2`（全白，应为 255），用 `--pattern black` / `--pattern white` 各验一次。
+   5. **关掉测试图**：`camera-set TestPattern 0`。
+2. **调亮（实拍）**，一次只改一项，每改一次采一帧看 `max` 和均值：
+   1. 曝光：`camera-set ExposureTime 90`（单位微秒；10 kHz 时一行 100 µs，相机会按行频限制上限，超了程序直接拒绝并打印允许范围）。
+   2. 模拟增益（对信噪比更好，优先于数字增益）：`camera-set AnalogGain 4`（0..4 = 1.25 / 1.75 / 2 / 3 / 4 倍）。
+   3. 还不够再用数字增益：`camera-set DigitalGain 2.0`（0.10..15.99 倍）。
+   4. 最根本的还是光源和光圈：目标是背景灰度在 150–200、不饱和。
+3. 把每一步的 `CameraSet ... readback` 行、`CameraValue` 行和图的统计发回来。
+
 ## 6. 采到图之后可以马上做的验证（电脑上，不用板子）
 
 ```
@@ -190,4 +213,5 @@ python -I host/detect/candidates.py D:\SG3000_Captures\某张图.pgm --threshold
 5. 如果有：Windows 上 VisionKit 导出的**这台 16K 相机**的 GenICam XML（`cam_regs.h` 现在用的是 8K 型号的地址）
 5½. 16K 宽度实验：改宽度前后两次 `== Card params ==` 全段，以及两张遮半边的图
 5¾. **C2 读到的相机 XML 文件 + C3 的 `camera-regs-*.txt`**；第 5 步失败时的 `FailedStage` / `LastHeader` 几行
+5⅞. **V1 对测试图的完整输出**（尤其 `bits:` 和 `OR by column %3` 两行）；调亮每一步的 `CameraSet` / `CameraValue` 行和图统计
 6. **「02¾ 读取采集卡 XML」读到的文件**（`D:\SG3000_Captures\card-xml\` 里；`CameraWidth` 的地址在里面，见 I2 第 5 节）

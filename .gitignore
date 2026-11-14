@@ -3,6 +3,8 @@ board/out*/
 board/driver/output/
 *.o
 *.ko
+# 例外：实板验证过的驱动随 SD 包一起发（只适用于 5.15.19-xilinx-v2022.1，ABI 检查见 I7 第 8.1 节）
+!dist/glass-capture/sg3000_rx.ko
 *.mod*
 *.cmd
 Module.symvers

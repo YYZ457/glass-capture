@@ -292,6 +292,12 @@ def test_camera_set_and_two_cable_hint(board):
         console.start("camera_set", {"name": "ClConfiguration", "value": 4})   # 相机的 EightyBit 是 3
     with pytest.raises(ValueError):
         console.start("camera_set", {"name": "UserSetSave", "value": 1})
+    with pytest.raises(ValueError):
+        console.start("camera_set", {"name": "TestPattern", "value": 4})          # 16K XML 没有 4
+    with pytest.raises(ValueError):
+        console.start("camera_set", {"name": "DigitalGain", "value": 16.5})
+    with pytest.raises(ValueError):
+        console.start("camera_set", {"name": "ExposureTime", "value": True})
     fake = tmp / "board" / "sg3000-capture"
     fake.write_text("#!/bin/bash\n[ \"$1\" = camera-set ] || exit 9\n"
                     "echo \"CameraSet $2 0x01501008: 3 -> $3, readback $3\"\n"
@@ -299,6 +305,11 @@ def test_camera_set_and_two_cable_hint(board):
     fake.chmod(0o755)
     job = run(console, "camera_set", {"name": "ClConfiguration", "value": 0})
     assert job["status"] == "success" and "3 → 0" in job["message"] and "DeviceTapGeometry=3" in job["message"], job
+    fake.write_text("#!/bin/bash\n[ \"$1 $2 $3\" = 'camera-set ExposureTime 80.5' ] || exit 9\n"
+                    "echo 'CameraSet ExposureTime 0x01001010: 4800 -> 7728, readback 7728'\n"
+                    "echo 'CameraValue ExposureTime = 80.50 us'\n")
+    job = run(console, "camera_set", {"name": "ExposureTime", "value": 80.5})
+    assert job["status"] == "success" and "80.50 us" in job["message"], job
 
     status = tmp / "board" / "sg_status"
     status.write_text("#!/bin/bash\necho 'DDR status      2'\necho 'pixel clocks    0x00000019'\n"

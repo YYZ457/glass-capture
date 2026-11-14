@@ -22,7 +22,20 @@ cam_config（宽度、行频、曝光……）      地址表 cam_regs.h [16K确
 | `sg3000-capture camera-xml DIR` | 按清单表从相机读出它自己的 GenICam XML（.zip/.xml），打印 SHA1 | C2 读取相机 XML |
 | `sg3000-capture camera-regs NAME@ADDR:LEN ...` | 按清单读一串寄存器 | C3 读相机寄存器 |
 | `sg3000-capture camera-read ADDR [LEN]` | 读任意地址，十六进制打印 | — |
-| `sg3000-capture camera-set ClConfiguration\|DeviceTapGeometry V` | **唯一的相机写**：CL 模式 0 Base / 3 EightyBit；Tap 2/3（仅 Base）。核对型号、写后读回，不存 User Set | 写入相机 |
+| `sg3000-capture camera-set NAME VALUE` | **唯一的相机写**，只改运行时值、从不写 UserSetSave。白名单见下表 | 写入相机 |
+
+`camera-set` 白名单（`board/camera_ctrl/cam_set.c`，地址、值域、锁定条件全部照相机 XML）：
+
+| NAME | 地址 | 输入 | 写入值 | 条件 |
+|---|---|---|---|---|
+| `ClConfiguration` | `0x01501008` | 0 Base / 3 EightyBit | 同左 | — |
+| `DeviceTapGeometry` | `0x01501010` | 2 / 3 | 同左 | 相机为 Base + Mono8 |
+| `TestPattern` | `0x01100000` | 0 / 1 / 2 / 3 / 5 | 同左 | 16K XML 没有 4、6 |
+| `ExposureTime` | `0x01001010` | 微秒 | µs × 96 | 在相机给的 `[0x01001014, 0x01001018]` 内（随行频变）|
+| `DigitalGain` | `0x0120604c` | 0.10..15.99 倍 | 倍 × 256 | — |
+| `AnalogGain` | `0x01001c00` | 0..4 = 1.25/1.75/2/3/4 倍 | 同左 | `BinningV`（`0x01302040`）不为 1、2 |
+
+写之前核对型号必须是 `SW-WS2-CL16K-50M-SDE`，并读出上面用到的状态；写后读回，不一致报错。
 
 相机自己的 XML：`docs/vendor/camera_xml/SW-WS2-CL16K-50M-SDE_0.0.3.zip`（解压为 `SF6000V300R001C22XB003.xml`）。注意这台相机的 `ClConfiguration` 枚举 EightyBit = **3**，采集卡的是 **4**，两边编号不同。
 

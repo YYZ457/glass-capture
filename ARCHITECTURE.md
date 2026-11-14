@@ -87,6 +87,7 @@ apps ─▶ stream ─▶ processing
 | `cam_regs.h` | 相机寄存器地址 | ✅ 已用从相机读出的 16K XML 逐条核对（更正波特率地址、时钟 96 MHz）|
 | `cam_serial` | 串口邮箱初始化 / 收发 / 波特率 + GenCP 读写 | ✅ 实机 `cam_serial=1` + `port=0, baud=115200` 读出 `JAI / SW-WS2-CL16K-50M-SDE`；单路卡禁碰 port1（见 `docs/bringup_report_2026-11-14.md`） |
 | `cam_xml` | GenCP 清单表 → 从相机本身读 GenICam XML；按块读内存（重试 + 清残留）| ✅ 实板读出相机 XML（18,279 B，2 s）|
+| `cam_set` | `camera-set` 白名单 + 换算（CL 模式、Tap、测试图、曝光、数字/模拟增益）| 🟡 单测通过；CL 模式 / Tap 已实板写通，其余待测 |
 | `cam_config` | 宽度、行频、曝光、触发、测试图案、User Set | 🟡 已写在 cam_serial 之上；地址待 16K XML 核对 |
 
 ### board/transport/

@@ -20,7 +20,7 @@
 #define MIN_LINE_RATE_HZ    100u        /* 保守范围，待手册确认 */
 #define MAX_LINE_RATE_HZ    200000u
 #define EXPOSURE_TIMED      1u          /* 注意：Timed 是 1，不是 0 */
-#define MAX_TEST_PATTERN    6
+#define MAX_TEST_PATTERN    5           /* 16K XML：0 1 2 3 5（没有 4） */
 #define USERSET_SAVE_CMD    1u
 
 static int rd(struct cam_serial *s, uint32_t addr, uint32_t *v)
@@ -53,7 +53,7 @@ int cam_settings_check(const struct cam_settings *in)
     if (in->trigger != CAM_TRIG_FREE_RUN && in->trigger != CAM_TRIG_EXTERNAL) {
         return -EINVAL;
     }
-    if (in->test_pattern < 0 || in->test_pattern > MAX_TEST_PATTERN) {
+    if (in->test_pattern < 0 || in->test_pattern > MAX_TEST_PATTERN || in->test_pattern == 4) {
         return -EINVAL;
     }
     /* 曝光必须放得进一个行周期 */

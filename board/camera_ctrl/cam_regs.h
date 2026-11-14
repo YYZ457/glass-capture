@@ -32,7 +32,7 @@
 #define CAM_REG_LINE_TRIG_EDGE     0x01006048u  /* RW [16K确认] */
 
 /* 测试图案（verify/V1 用）*/
-#define CAM_REG_TEST_PATTERN       0x01100000u  /* RW [16K确认] 0 关 1 黑 2 白 3 水平灰度渐变 4 垂直渐变 5/6 移动渐变 */
+#define CAM_REG_TEST_PATTERN       0x01100000u  /* RW [16K确认] 0 Off / 1 Black / 2 White / 3 GreyHorizontalRamp / 5 GreyHorizontalRampMoving（16K XML 没有 4、6；那是 8K 的） */
 
 /* Camera Link 输出配置 */
 #define CAM_REG_CL_CONFIG          0x01501008u  /* RW [16K确认] 只有两种：Base = 0，EightyBit（双线）= 3；实测 3 */

@@ -360,3 +360,13 @@ VisionKit 读"设备 XML"走的就是 GenCP 标准清单表（BRM `0x1D0` → �
 4. **单元测试与宿主测试**：
    - ZCU102 板上（`fd302d0` 提交）：`fake_card_test`（`#1–#14`）`ALL PASS`、`unit_test` `ALL PASS`；`driver_whitelist_test` 于 `a733bff` 板上通过（`sg3000_rx.c` 未改）。合并回 `origin/main`（`32e250c`）后已完成全套静态 ARM64 交叉编译（零警告）。
    - 宿主机：`pytest host/tests/test_console.py -v` `17 passed`（`test_board_sim.py` 需 Linux pty/gcc，在 Windows 上跳过）。
+
+---
+
+## 11. Claude 复核第 10 节（同日）
+
+- **停采修复**：`SG_HDR_READY` 读即弹出、读空后才转 STOP，这个 FPGA 行为只能靠实板对照试出来。修复写法也稳妥：有 6 秒上限，不会死等。已在 x86 和 ARM64 上复跑 `fake_card_test` #1–#14，全部通过。
+- **图偏暗、第 6/7 位从没出现**：可能是光不够（曝光 50 µs、增益 1 倍），也可能是位丢了。用测试图一次分清，步骤见 BRINGUP 第 5⅞ 节。
+- **新增**：`camera-set` 放开 `TestPattern`（0/1/2/3/5）、`ExposureTime`（微秒，按相机实时给的上下限检查）、`DigitalGain`（倍）、`AnalogGain`（0..4）。白名单写成纯函数 `cam_set.c`，有单元测试。`V1_testpattern.py` 加了位统计，并支持带偏移的渐变和移动渐变。
+- **`.ko` 进 git**：`.gitignore` 放行 `dist/glass-capture/sg3000_rx.ko`；`make_sd_bundle.py` 不给 `--ko` 时保留已有的 `.ko`；`--bin-dir dist/glass-capture --ko X` 只补驱动、不重编程序。**`.ko` 文件本身要由 Gemini 提交**：Claude 这边没有板子内核树，编不出来。
+- 小更正：相机 XML 的文件名是 `docs/vendor/camera_xml/SF6000V300R001C22XB003.xml`（zip 里解出来的名字），不是 `..._0.0.3.xml`。

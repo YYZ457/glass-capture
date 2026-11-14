@@ -19,6 +19,7 @@
 #include "cam_serial.h"
 #include "sg_cardxml.h"
 #include "cam_xml.h"
+#include "cam_set.h"
 #include "sg3000_regs.h"
 
 static struct sg_image_view view(unsigned char *p, uint32_t w, uint32_t h)
@@ -282,10 +283,53 @@ static void test_cam_manifest(void)
     puts("cam manifest ok");
 }
 
+/* camera-set 白名单与换算（纯函数）。值域和锁定条件照 16K 相机 XML。 */
+static void test_cam_set(void)
+{
+    struct cam_set_state base = { 0, CAM16K_MONO8, 0, 96, 9000 };   /* Base、曝光 1..93.75 µs */
+    struct cam_set_state deca = { 3, CAM16K_MONO8, 0, 96, 9000 };
+    uint32_t raw = 0;
+    const char *why;
+
+    assert(cam_set_address("UserSetSave") == 0 && cam_set_address("TestPattern") == CAM16K_TEST_PATTERN);
+    assert(cam_set_check("ClConfiguration", "0", &deca, &raw, &why) == 0 && raw == 0);
+    assert(cam_set_check("ClConfiguration", "4", &deca, &raw, &why) == -EPERM);   /* 相机的 EightyBit 是 3 */
+    assert(cam_set_check("DeviceTapGeometry", "3", &base, &raw, &why) == 0 && raw == 3);
+    assert(cam_set_check("DeviceTapGeometry", "3", &deca, &raw, &why) == -EPERM && why);   /* EightyBit 锁定 */
+    assert(cam_set_check("DeviceTapGeometry", "10", &base, &raw, &why) == -EPERM);
+    assert(cam_set_check("TestPattern", "3", &base, &raw, &why) == 0 && raw == 3);
+    assert(cam_set_check("TestPattern", "5", &base, &raw, &why) == 0);
+    assert(cam_set_check("TestPattern", "4", &base, &raw, &why) == -EPERM);        /* 16K XML 没有 4、6 */
+    assert(cam_set_check("TestPattern", "6", &base, &raw, &why) == -EPERM);
+    assert(cam_set_check("TestPattern", "x", &base, &raw, &why) == -EINVAL);
+    assert(cam_set_check("TestPattern", "-1", &base, &raw, &why) == -EINVAL);
+    assert(cam_set_check("ExposureTime", "50", &base, &raw, &why) == 0 && raw == 4800);  /* 实测默认 */
+    assert(cam_set_check("ExposureTime", "80.5", &base, &raw, &why) == 0 && raw == 7728);
+    assert(cam_set_check("ExposureTime", "95", &base, &raw, &why) == -EPERM);      /* 超过相机给的上限 */
+    assert(cam_set_check("ExposureTime", "0.5", &base, &raw, &why) == -EPERM);     /* 低于下限 */
+    {
+        struct cam_set_state bad = base;
+        bad.exposure_min_clk = 0;
+        assert(cam_set_check("ExposureTime", "50", &bad, &raw, &why) == -EPERM);   /* 相机没给范围就不写 */
+    }
+    assert(cam_set_check("DigitalGain", "1", &base, &raw, &why) == 0 && raw == 256);
+    assert(cam_set_check("DigitalGain", "2.5", &base, &raw, &why) == 0 && raw == 640);
+    assert(cam_set_check("DigitalGain", "16", &base, &raw, &why) == -EPERM);
+    assert(cam_set_check("DigitalGain", "0.05", &base, &raw, &why) == -EPERM);
+    assert(cam_set_check("AnalogGain", "4", &base, &raw, &why) == 0 && raw == 4);
+    assert(cam_set_check("AnalogGain", "5", &base, &raw, &why) == -EPERM);
+    {
+        struct cam_set_state binned = base;
+        binned.binning_v = 2;
+        assert(cam_set_check("AnalogGain", "1", &binned, &raw, &why) == -EPERM);   /* SensorBinVerLock */
+    }
+    puts("cam set ok");
+}
+
 int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
-    test_view_stats(); test_candidates(); test_linecheck(); test_pipeline(); test_cam_serial(); test_cardxml_url(); test_cam_manifest();
+    test_view_stats(); test_candidates(); test_linecheck(); test_pipeline(); test_cam_serial(); test_cardxml_url(); test_cam_manifest(); test_cam_set();
     puts("unit: ALL PASS");
     return 0;
 }

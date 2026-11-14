@@ -711,21 +711,28 @@ class Console:
         old, _, back = (int(x) for x in done.groups()[1:])
         return f"采集卡 {o['name']}：{old} → {back}（已读回确认）。重新「04 采集一帧」看效果；断电后恢复默认。"
 
-    # 和板上 camera_set_allowed() 一致（地址来自这台 16K 相机自己的 XML）。Tap 只在相机为 Base 时可改，板上再查一次。
-    CAMERA_SET_RANGES = {'ClConfiguration': (0, 3), 'DeviceTapGeometry': (2, 3)}
+    # 和板上 cam_set_check()（board/camera_ctrl/cam_set.c）一致；锁定条件和曝光上下限由板上按相机当前状态再查一次。
+    CAMERA_SET_INTS = {'ClConfiguration': (0, 3), 'DeviceTapGeometry': (2, 3),
+                       'TestPattern': (0, 1, 2, 3, 5), 'AnalogGain': (0, 1, 2, 3, 4)}
+    CAMERA_SET_FLOATS = {'ExposureTime': (0.0, 100000.0), 'DigitalGain': (0.10, 15.99)}
 
     @classmethod
     def _check_camera_set(cls, options):
         name, value = options.get('name'), options.get('value')
-        if name not in cls.CAMERA_SET_RANGES or type(value) is not int or value not in cls.CAMERA_SET_RANGES[name]:
-            raise ValueError('相机只允许改 ClConfiguration（0 Base / 3 EightyBit）和 DeviceTapGeometry（2 / 3，仅 Base 时）。')
-        return dict(name=name, value=value)
+        if name in cls.CAMERA_SET_INTS and type(value) is int and value in cls.CAMERA_SET_INTS[name]:
+            return dict(name=name, value=value, text=str(value))
+        if name in cls.CAMERA_SET_FLOATS and type(value) in (int, float):
+            lo, hi = cls.CAMERA_SET_FLOATS[name]
+            if (lo < value if name == 'ExposureTime' else lo <= value) and value <= hi:
+                return dict(name=name, value=value, text=f'{value:g}')
+        raise ValueError('相机参数不在允许范围：ClConfiguration 0/3，DeviceTapGeometry 2/3（仅 Base），'
+                         'TestPattern 0/1/2/3/5，ExposureTime 微秒，DigitalGain 0.10–15.99，AnalogGain 0–4。')
 
     def _camera_set(self):
         """写相机的 Camera Link 输出模式（不保存，相机断电恢复）。写后读回核对。"""
         o = self.camera_set_options
         self._ensure_cam_serial()
-        rc, output = self.exchange(f"{APP} camera-set {o['name']} {o['value']} 2>&1", 30)
+        rc, output = self.exchange(f"{APP} camera-set {o['name']} {o['text']} 2>&1", 30)
         done = re.search(r'CameraSet (\w+) 0x[0-9a-f]+: (\d+) -> (\d+), readback (\d+)', output)
         if rc or not done:
             raise RuntimeError('相机参数没写成：' + output[-400:])
@@ -734,7 +741,8 @@ class Console:
         mode = {0: 'Base', 3: 'EightyBit'}
         now = (f"相机现在 ClConfiguration={state.group(1)}（{mode.get(int(state.group(1)), '?')}）、"
                f"DeviceTapGeometry={state.group(2)}。") if state else ''
-        return (f"相机 {o['name']}：{old} → {back}（已读回确认）。" + now +
+        value = re.search(r'CameraValue \w+ = ([^\r\n]*)', output)
+        return (f"相机 {o['name']}：{old} → {back}（已读回确认" + (f"，= {value.group(1)}" if value else '') + "）。" + now +
                 '采集卡要改成同样的模式（见 BRINGUP 第 5¾ 节）；相机断电后恢复 EightyBit。')
 
     @staticmethod

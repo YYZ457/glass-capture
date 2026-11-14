@@ -40,6 +40,7 @@
 #include "tx_tcp.h"
 #include "cam_serial.h"
 #include "cam_xml.h"
+#include "cam_set.h"
 #include "sg_mailbox.h"
 #include "sg3000_regs.h"
 #include "sg_err.h"
@@ -65,8 +66,9 @@ static void usage(void)
          "       sg3000-capture camera-xml OUTDIR [--entry N] [--device PATH] [--port 0|1] [--baud N]\n"
          "       sg3000-capture camera-read ADDR [LEN] [--device PATH] [--port 0|1] [--baud N]\n"
          "       sg3000-capture camera-regs NAME@ADDR:LEN ... [--device PATH] [--port 0|1] [--baud N]\n"
-         "       sg3000-capture camera-set ClConfiguration|DeviceTapGeometry VALUE [--device PATH] [--baud N]\n"
-         "         camera-set is the only camera write (ClConfiguration 0/3, DeviceTapGeometry 2/3 in Base);\n"
+         "       sg3000-capture camera-set NAME VALUE [--device PATH] [--baud N]   (runtime only, never UserSetSave)\n"
+         "         ClConfiguration 0|3, DeviceTapGeometry 2|3 (Base only), TestPattern 0|1|2|3|5,\n"
+         "         ExposureTime <us>, DigitalGain <0.10..15.99>, AnalogGain 0..4 (=1.25/1.75/2/3/4x)\n"
          "         other camera commands are read-only; all need insmod sg3000_rx.ko cam_serial=1, default baud 115200\n"
          "       sg3000-capture card-set NAME VALUE [--device PATH]\n"
          "         NAME: CameraWidth CameraHeight DeviceTapGeometry ClConfiguration CameraScanType\n"
@@ -558,79 +560,79 @@ out:
     return ret ? 1 : 0;
 }
 
-/* sg3000-capture camera-set NAME VALUE：写相机的 Camera Link 输出模式（GenCP WriteMem）。
- * 只放开两个寄存器，地址来自这台相机自己的 XML（docs/vendor/camera_xml/，2026-11-14 从相机读出）：
- *   ClConfiguration   0x01501008  0 Base / 3 EightyBit
- *   DeviceTapGeometry 0x01501010  2 / 3（相机 XML：只在 Base + Mono8 时可改；EightyBit 时相机锁定为 10）
- * 写之前核对型号（换了相机地址可能不同）；写前写后都读。不保存到 User Set：相机断电即恢复 UserSet1。 */
-#define CAMERA_MODEL_16K        "SW-WS2-CL16K-50M-SDE"
-#define CAM16K_CL_CONFIG        0x01501008u
-#define CAM16K_TAP_GEOMETRY     0x01501010u
-#define CAM16K_PIXEL_FORMAT     0x01401040u
-#define CAM16K_MONO8            0x01080001u
-
-static int camera_set_allowed(uint32_t addr, uint32_t value, uint32_t cl_now, uint32_t pixfmt_now)
+/* sg3000-capture camera-set NAME VALUE：改相机的运行时参数（GenCP WriteMem）。
+ * 允许的名字、值、锁定条件见 camera_ctrl/cam_set.h（全部来自这台 16K 相机自己的 XML）。
+ * 写之前核对型号、读当前状态；写后读回。从不写 UserSetSave：相机断电恢复 UserSet1。 */
+static void print_camera_value(const char *name, uint32_t raw)
 {
-    if (addr == CAM16K_CL_CONFIG) return value == 0u || value == 3u;
-    if (addr == CAM16K_TAP_GEOMETRY)
-        return (value == 2u || value == 3u) && cl_now == 0u && pixfmt_now == CAM16K_MONO8;
-    return 0;
+    if (!strcmp(name, "ExposureTime"))
+        printf("CameraValue ExposureTime = %.2f us\n", raw / (double)CAM16K_SENSOR_MHZ);
+    else if (!strcmp(name, "DigitalGain"))
+        printf("CameraValue DigitalGain = %.3f x\n", raw / 256.0);
+    else if (!strcmp(name, "AnalogGain")) {
+        static const char *g[] = { "1.25", "1.75", "2.0", "3.0", "4.0" };
+        printf("CameraValue AnalogGain = %s x\n", raw < 5 ? g[raw] : "?");
+    }
 }
 
 static int camera_set_main(int argc, char **argv)
 {
-    const char *device = SG_DEFAULT_DEVICE;
+    const char *device = SG_DEFAULT_DEVICE, *why = NULL;
     unsigned port = 0;
-    unsigned long baud = CAMERA_DEFAULT_BAUD, parsed;
+    unsigned long baud = CAMERA_DEFAULT_BAUD;
     unsigned char model[CAM_BRM_STRING_LEN];
     static struct camera_ctx x;
-    uint32_t addr, value, old = 0, back = 0, cl = 0, tap = 0, pixfmt = 0;
-    char *end;
+    struct cam_set_state st;
+    uint32_t addr, raw = 0, old = 0, back = 0, cl = 0, tap = 0;
     int a, ret;
 
-    if (argc < 4) { usage(); return 2; }
-    if (!strcmp(argv[2], "ClConfiguration")) addr = CAM16K_CL_CONFIG;
-    else if (!strcmp(argv[2], "DeviceTapGeometry")) addr = CAM16K_TAP_GEOMETRY;
-    else { usage(); return 2; }
-    errno = 0;
-    parsed = strtoul(argv[3], &end, 0);
-    if (errno || *end || parsed > 0xffffffffUL) { usage(); return 2; }
-    value = (uint32_t)parsed;
+    if (argc < 4 || !(addr = cam_set_address(argv[2]))) { usage(); return 2; }
     for (a = 4; a < argc; ++a) {
         int r = camera_common_arg(argc, argv, &a, &device, &port, &baud);
         if (r <= 0) { usage(); return 2; }
+    }
+    memset(&st, 0, sizeof st);
+    if (cam_set_check(argv[2], argv[3], &(struct cam_set_state){ 0, CAM16K_MONO8, 0, 1, 0xffffffffu },
+                      &raw, &why) == -EINVAL) {
+        usage();   /* 格式就不对（比如 TestPattern abc）：不碰硬件 */
+        return 2;
     }
     if ((ret = install_interrupt())) goto out;
     ret = camera_open(&x, device, port, baud);
     if (!ret) ret = cam_read_mem(&x.ser, CAM_BRM_MODEL, model, sizeof model, CAMERA_TIMEOUT_MS, CAMERA_RETRIES, NULL, NULL);
     if (ret) goto out;
     model[sizeof model - 1] = 0;
-    if (strcmp((const char *)model, CAMERA_MODEL_16K)) {
+    if (strcmp((const char *)model, CAM16K_MODEL)) {
         fprintf(stderr, "Refused: camera model is \"%s\", register addresses are only verified for %s\n",
-                (const char *)model, CAMERA_MODEL_16K);
+                (const char *)model, CAM16K_MODEL);
         ret = -ENODEV;
         goto out;
     }
-    if ((ret = cam_gencp_read32(&x.ser, CAM16K_CL_CONFIG, &cl, CAMERA_TIMEOUT_MS)) ||
-        (ret = cam_gencp_read32(&x.ser, CAM16K_PIXEL_FORMAT, &pixfmt, CAMERA_TIMEOUT_MS)) ||
+    if ((ret = cam_gencp_read32(&x.ser, CAM16K_CL_CONFIG, &st.cl_config, CAMERA_TIMEOUT_MS)) ||
+        (ret = cam_gencp_read32(&x.ser, CAM16K_PIXEL_FORMAT, &st.pixel_format, CAMERA_TIMEOUT_MS)) ||
+        (ret = cam_gencp_read32(&x.ser, CAM16K_BINNING_V, &st.binning_v, CAMERA_TIMEOUT_MS)) ||
+        (ret = cam_gencp_read32(&x.ser, CAM16K_EXPOSURE_MIN_CLK, &st.exposure_min_clk, CAMERA_TIMEOUT_MS)) ||
+        (ret = cam_gencp_read32(&x.ser, CAM16K_EXPOSURE_MAX_CLK, &st.exposure_max_clk, CAMERA_TIMEOUT_MS)) ||
         (ret = cam_gencp_read32(&x.ser, addr, &old, CAMERA_TIMEOUT_MS)))
         goto out;
-    if (!camera_set_allowed(addr, value, cl, pixfmt)) {
-        fprintf(stderr, "Refused: %s = %u not allowed (camera ClConfiguration=%u PixelFormat=0x%08x; "
-                "ClConfiguration: 0 Base / 3 EightyBit; DeviceTapGeometry: 2 or 3, only in Base + Mono8)\n",
-                argv[2], value, cl, pixfmt);
-        ret = -EPERM;
+    ret = cam_set_check(argv[2], argv[3], &st, &raw, &why);
+    if (ret) {
+        fprintf(stderr, "Refused: %s = %s (%s). Camera now: ClConfiguration=%u PixelFormat=0x%08x BinningV=%u "
+                "Exposure range %.2f..%.2f us\n", argv[2], argv[3], why ? why : "not allowed",
+                st.cl_config, st.pixel_format, st.binning_v,
+                st.exposure_min_clk / (double)CAM16K_SENSOR_MHZ, st.exposure_max_clk / (double)CAM16K_SENSOR_MHZ);
         goto out;
     }
-    if ((ret = cam_gencp_write32(&x.ser, addr, value, CAMERA_TIMEOUT_MS)) ||
+    if ((ret = cam_gencp_write32(&x.ser, addr, raw, CAMERA_TIMEOUT_MS)) ||
         (ret = cam_gencp_read32(&x.ser, addr, &back, CAMERA_TIMEOUT_MS)) ||
         (ret = cam_gencp_read32(&x.ser, CAM16K_CL_CONFIG, &cl, CAMERA_TIMEOUT_MS)) ||
         (ret = cam_gencp_read32(&x.ser, CAM16K_TAP_GEOMETRY, &tap, CAMERA_TIMEOUT_MS)))
         goto out;
-    printf("CameraSet %s 0x%08x: %u -> %u, readback %u\n", argv[2], addr, old, value, back);
+    printf("CameraSet %s 0x%08x: %u -> %u, readback %u\n", argv[2], addr, old, raw, back);
+    print_camera_value(argv[2], back);
     printf("CameraState ClConfiguration=%u (0 Base / 3 EightyBit) DeviceTapGeometry=%u PixelFormat=0x%08x "
-           "(not saved: camera power cycle restores UserSet1)\n", cl, tap, pixfmt);
-    if (back != value) {
+           "(not saved: camera power cycle restores UserSet1)\n", cl, tap, st.pixel_format);
+    if (back != raw) {
         fprintf(stderr, "Camera did not keep the value\n");
         ret = -EIO;
     }
