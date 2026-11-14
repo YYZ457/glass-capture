@@ -10,7 +10,7 @@
 
 | 空间 | 大小 | 谁访问 | 内容 |
 |---|---|---|---|
-| BAR0 | 16 MiB | 用户态，经驱动白名单 | 邮箱、块头、采集控制；[逆向] 串口邮箱，可能还有 UART16550（见 I7） |
+| BAR0 | 16 MiB | 用户态，经驱动白名单 | 邮箱、块头、采集控制；[逆向] 串口邮箱 0x4110xx/0x4130xx、UART16550 0x1000/0x11000（见 I7）|
 | BAR1 | 64 KiB | 只有内核驱动 | XDMA 引擎（C2H 0x1000，IRQ 块 0x2000，配置块 0x3000，SGDMA 描述符 0x5000）|
 | 逻辑地址 | — | 经 BAR0 邮箱，由卡固件代访问 | DDR 状态、Camera Link 状态、启停 |
 
@@ -59,7 +59,7 @@ BAR0 上有三套同构邮箱 [逆向]：
 
 | 地址 | 含义 | 可信度 | 实测值 |
 |---|---|---|---|
-| 0x10540010 | VisionKit 枚举相机时读它，判 `'1'`（0x31）| 逆向 | 待测（`sg_status` 已加只读打印）|
+| 0x10540010 | 低字节 `'1'`（0x31）时 VisionKit 认为卡有 2 路，否则 1 路 | 逆向 | 待测（`sg_status` 已加只读打印）|
 | 0x10540024 | DDR 初始化状态（0 未初始化 / 2 已校准）| 推测 | 2 |
 | 0x10002020 | 像素时钟，bit0 = Clock1 | 推测 | 0x59（bit3/4/6 含义未知）|
 | 0x10601004 | Camera Link 配置（0 = Base）| 推测 | 0 |
@@ -80,18 +80,18 @@ Windows 软件连接后会设置的卡参数见 `docs/vendor/README.md`。其中
 | `CameraPixelDepth` | 0x1060100c | 8 | 同一个参数 |
 | `CameraScanType`、`DeviceTapGeometry`、**`CameraWidth`**、**`CameraHeight`** | 未知 | — | 可能在 0x106010xx 附近，**不要去试写** |
 
-**[逆向] 为什么 DLL 里找不到这些地址**：`LusterGraber.dll` 里唯一的卡寄存器常量是 0x10540010。其余地址全部运行时从卡的 XML 读入，来源有两种：
-- 本地文件 `SGCard.xml`；
-- 按 URL `Local:<name>;<hex_addr>;<hex_len>`，用 `0x80000000` 读包（就是本仓库用的邮箱读）从卡存储里读。
+**[逆向] 卡的 XML 在卡存储里，Linux 能直接读出来**：
+- VisionKit 的 DLL 里没有这些地址常量，全部在运行时从卡的 XML 读入。
+- XML 的位置写在卡逻辑地址 **0x190** 处的 URL 字符串里（0x100 字节，第 2 路在 0x290），格式是 `Local:<文件名>;<十六进制地址>;<十六进制长度>`。
+- 读取用的是和预检同一种邮箱读。
 
-所以**只有拿到 `SGCard.xml` 才能知道 `CameraWidth` 的地址**，逆向 DLL 本身给不出来。
-
-如果知道 URL 字符串存在哪个逻辑地址，Linux 端用现有的邮箱读就能把 XML 读出来，不用去 Windows。这件事要让 Gemini 在 `ReadXmlFile`（`0x180007dca..`）里找。
+已实现：`sg_status --card-xml DIR`，也可以点中控台「02¾ 读取采集卡 XML」。**拿到它，上表就能全部确认。**
 
 ## 6. 待办
 
 - [ ] 拿到卡的 XML，找到 `CameraWidth` / `CameraHeight` / `DeviceTapGeometry` 的地址
-- [ ] 逆向：`ReadXmlFile` 从哪个逻辑地址读 URL 字符串（知道了就能在 Linux 上直接读出 SGCard.xml）
+- [x] 逆向：`ReadXmlFile` 从哪个逻辑地址读 URL 字符串 → 0x190
+- [ ] 上板运行「02¾ 读取采集卡 XML」，把读出的文件发给 Claude
 - [ ] Windows：`VkConfigSave(sg3000, ...)` 存一份卡的当前参数
 - [ ] 卡的 XML 核对第 4 节所有推测地址
 - [ ] 弄清 0x10002020 时钟寄存器：日志显示早期 0x19 且位深 0（失败），后来 0x59 且位深 8（成功），bit6 可能和相机就绪有关

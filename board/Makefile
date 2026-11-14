@@ -12,7 +12,7 @@ INC     = -I../include -Icapture -Iprocessing -Istream -Icamera_ctrl -Itransport
 OUT     = out
 
 CAPTURE    = capture/sg_session.c capture/sg_mailbox.c capture/sg_preflight.c \
-             capture/sg_block.c capture/sg_acq.c capture/sg_io_linux.c
+             capture/sg_block.c capture/sg_acq.c capture/sg_io_linux.c capture/sg_cardxml.c
 PROCESSING = processing/sg_view.c processing/sg_stats.c processing/sg_candidates.c
 STREAM     = stream/sg_pipeline.c stream/sg_linecheck.c
 CAMERA     = camera_ctrl/cam_serial.c camera_ctrl/cam_config.c
@@ -37,7 +37,10 @@ TEST_CFLAGS = -std=c11 -O1 -g -Wall -Wextra -Werror -UNDEBUG
 test: | $(OUT)
 	$(CC) $(TEST_CFLAGS) $(INC) -static tests/fake_card_test.c $(LIB) -lm -o $(OUT)/fake_card_test
 	$(CC) $(TEST_CFLAGS) $(INC) -static -pthread tests/unit_test.c $(LIB) -lm -o $(OUT)/unit_test
+	sed -n '/WHITELIST-BEGIN/,/WHITELIST-END/p' driver/sg3000_rx.c > $(OUT)/whitelist.inc
+	$(CC) $(TEST_CFLAGS) -I$(OUT) -static tests/driver_whitelist_test.c -o $(OUT)/driver_whitelist_test
 	$(RUN) $(OUT)/fake_card_test
+	$(RUN) $(OUT)/driver_whitelist_test
 	$(RUN) $(OUT)/unit_test
 
 check:

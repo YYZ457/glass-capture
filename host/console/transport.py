@@ -29,6 +29,7 @@ BOARD_CAPTURES = '/tmp/sg3000-console'   # 板上存采集图的目录（内存�
 APP = BOARD_DIR + '/sg3000-capture'
 STREAM_APP = BOARD_DIR + '/sg3000-stream'
 STATUS_APP = BOARD_DIR + '/sg_status'
+CARD_XML_DIR = BOARD_DIR + '/card-xml'   # 板上存卡 XML 的目录
 APP_VERSION = 'sg3000-capture 1.0 ABI 1'
 STREAM_VERSION = 'sg3000-stream 0.2 ABI 1'
 
@@ -40,6 +41,7 @@ SD_BUNDLE = SD_MOUNT + '/glass-capture'
 SD_LEGACY = SD_MOUNT + '/sg3000-linux-20261023'
 
 NET_PORT = 8770
+HEXDUMP = '/usr/bin/hexdump'               # 串口回传文件时用板上的 hexdump 转成十六进制文本
 CAPTURES = Path(os.environ.get('SG_CAPTURES_DIR') or ('D:/SG3000_Captures' if os.name == 'nt' else Path.home() / 'SG3000_Captures'))
 PROMPT = re.compile(r'(?:^|[\r\n])[^\r\n]{0,140}# ?$')
 
@@ -279,7 +281,7 @@ class Console:
         return output
 
     def start(self, action, options=None):
-        if action not in {'probe', 'prepare', 'preflight', 'capture', 'fetch_last', 'dmesg', 'release', 'prepare_stream', 'stream', 'replay', 'status', 'network'}:
+        if action not in {'probe', 'prepare', 'preflight', 'capture', 'fetch_last', 'dmesg', 'release', 'prepare_stream', 'stream', 'replay', 'status', 'network', 'card_xml'}:
             raise ValueError('未知操作。')
         with self.lock:
             if action != 'replay' and (not self.connected or not self.shell_ready):
@@ -369,6 +371,20 @@ class Console:
             raise RuntimeError('体检完成，但预检没通过。看日志里的 Preflight FAILED 那一行和时钟位。')
         return '体检通过：驱动正常、预检五项正常。没有启动采集。'
 
+    def _card_xml(self):
+        """只读：从采集卡存储里读出卡自己的 GenICam XML，取回电脑（宽度寄存器的地址在里面）。"""
+        self.event('system', '正在从采集卡存储读 XML：每次读 4 字节，可能要一两分钟，请不要中断。')
+        rc, output = self.exchange(f"mkdir -p {CARD_XML_DIR} && {STATUS_APP} --card-xml {CARD_XML_DIR}", 900)
+        if rc == 2:
+            raise RuntimeError('打不开采集卡设备（驱动没加载，或被别的程序占用）。先做「从 SD 加载程序」。')
+        saved = re.search(r'CardXML saved: (\S+) \((\d+) bytes', output)
+        if not saved:
+            fail = re.search(r'CardXML FAILED: ([^\r\n]*)', output)
+            raise RuntimeError('没读出采集卡 XML：' + (fail.group(1) if fail else output[-400:])
+                               + '。把日志里 == Card XML == 那一段发给 Claude。')
+        local, n, *_ = self._fetch_file_from_board(saved.group(1), CAPTURES / 'card-xml', preview=False)
+        return f'采集卡 XML 已存到电脑：{local}（{n:,} 字节）。把它发给 Claude：CameraWidth 等寄存器的地址就在里面。'
+
     def _parse_preflight_status(self, output):
         ddr = re.search(r'DDR status\s+(\d+)', output)
         clk = re.search(r'pixel clocks\s+0x([0-9a-fA-F]+)', output)
@@ -398,14 +414,14 @@ class Console:
                         reads_confirmed=rc == 0 or '(-67)' in output or '(-95)' in output)
         self.checks['preflight'] = data
 
-    def _fetch_file_from_board(self, remote_path, local_dest_dir=CAPTURES):
+    def _fetch_file_from_board(self, remote_path, local_dest_dir=CAPTURES, preview=True):
         local_dest_dir = Path(local_dest_dir)
         local_dest_dir.mkdir(parents=True, exist_ok=True)
         filename = Path(remote_path).name
         local_file = local_dest_dir / filename
         temp_gz = f"/tmp/{filename}.gz"
 
-        self.event('system', f'正在板端打包压缩图像：{filename} ...')
+        self.event('system', f'正在板端打包压缩：{filename} ...')
         self.run_checked(f"gzip -1 -c '{remote_path}' > '{temp_gz}'", timeout=20)
 
         size_str = self.run_checked(f"wc -c < '{temp_gz}'", timeout=10)
@@ -419,7 +435,7 @@ class Console:
 
         self.silent_rx = True
         try:
-            rc, hex_output = self.exchange(f"/usr/bin/hexdump -v -e '16/1 \"%02x\" \"\\n\"' '{temp_gz}'", timeout=transfer_timeout)
+            rc, hex_output = self.exchange(f"{HEXDUMP} -v -e '16/1 \"%02x\" \"\\n\"' '{temp_gz}'", timeout=transfer_timeout)
         finally:
             self.silent_rx = False
 
@@ -440,10 +456,12 @@ class Console:
         except Exception as dec_err:
             raise ValueError(f"图像解包校验失败（期望 {gz_size:,} 字节，接收 {len(gz_bytes):,} 字节）：{dec_err}")
         local_file.write_bytes(decompressed)
-        self.event('system', f'图像已成功存入电脑：{local_file}（{len(decompressed):,} 字节）')
+        self.event('system', f'文件已存入电脑：{local_file}（{len(decompressed):,} 字节）')
 
         preview_file = local_dest_dir / (local_file.stem + '_preview.png')
         width, height = 4096, 2000
+        if not preview:
+            return local_file, len(decompressed), gz_size, 0, 0
         try:
             from PIL import Image
             import io

@@ -16,7 +16,7 @@
 ## 结论
 
 1. **单线 Base 跑不满 75 mm/s**：3 tap 传一行 16384 像素要约 5462 个时钟，15.36 kHz 下每行预算约 5533 个，只剩约 71 个做行消隐（1.3%）。实际相机通常需要更多。
-   - 相机只支持 Base 和 EightyBit 两种配置（相机 XML [参考8K]），没有中间档
+   - 相机只支持 Base 和 EightyBit 两种配置（相机 XML [参考8K]），没有中间档。2026-11-14：16K 原厂彩页确认接口是 "CameraLink Deca & Base"（Deca = EightyBit）
    - 要么降速：约 60 mm/s → 12.3 kHz、201 Mpx/s，Base 有约 20% 余量
    - 要么上双线：需确认 SG3000 支持 EightyBit、有第二根线，且 PCIe ×1 的 500 MB/s 仍够用
 2. **满速原图出不了板子**（252 MB/s > 千兆网 110 MB/s）→ 最终在板上检测，只发候选（`processing/sg_candidates`、`transport/tx_tcp`）。

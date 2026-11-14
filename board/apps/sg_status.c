@@ -2,18 +2,19 @@
  *
  * sg_status —— 只读体检程序（零风险：不启动采集、不写任何控制寄存器）。
  *
- * 用法：sg_status [--device PATH]
+ * 用法：sg_status [--device PATH] [--card-xml DIR]
  * 输出：
  *   1. 驱动信息（SG_IOC_INFO）：PCIe 位置、ABI、引擎 ID、对齐要求、poisoned
  *   2. 预检结果：DDR 状态、时钟寄存器（逐位打印）、CL 配置、彩色、位深
  *   3. SG_HDR_READY、SG_ACQ_STATE 的当前值，以及 VisionKit 枚举相机时读的 0x10540010
- * 退出码：0 一切正常；1 预检不通过；2 打不开设备
+ *   4. （--card-xml）从卡存储读出卡自己的 GenICam XML，存到 DIR，见 sg_cardxml.h
+ * 退出码：0 一切正常；1 预检不通过；2 打不开设备；3 读卡 XML 失败
  *
  * 组装：sg_io_linux（打开设备）→ sg_session → sg_preflight
  * 没有 legacy 来源；可参考 legacy sg3000_capture.c 的 "preflight" 子命令。
  *
  * 这个程序里只有"读"：
- *   - 邮箱读（预检五项 + 0x10540010）
+ *   - 邮箱读（预检五项 + 0x10540010；--card-xml 时还有 URL 和 XML 所在的地址）
  *   - 直接读两个 BAR0 寄存器（SG_HDR_READY、SG_ACQ_STATE）
  * 没有任何写，也没有启动 DMA。
  *
@@ -29,6 +30,9 @@
 #include "sg_session.h"
 #include "sg_preflight.h"
 #include "sg_mailbox.h"
+#include "sg_cardxml.h"
+#include <stdlib.h>
+#include <time.h>
 #include "sg3000_regs.h"
 #include "sg_err.h"
 
@@ -36,11 +40,13 @@
 #define EXIT_OK          0
 #define EXIT_PREFLIGHT   1
 #define EXIT_OPEN_FAIL   2
+#define EXIT_CARD_XML    3
 
 static void usage(void)
 {
-    puts("Usage: sg_status [--device PATH]\n"
+    puts("Usage: sg_status [--device PATH] [--card-xml DIR]\n"
          "Read-only check: driver info, preflight, header-ready and acquisition state.\n"
+         "--card-xml DIR  also read the card's own GenICam XML from card storage into DIR.\n"
          "Default device: " SG_DEFAULT_DEVICE);
 }
 
@@ -129,13 +135,92 @@ static void print_registers(struct sg_capture_session *s, uint32_t timeout_ms)
     if (ret) {
         printf("camera enum     read failed: %s (%d)\n", strerror(-ret), ret);
     } else {
-        printf("camera enum     0x%08x   (VisionKit checks for 0x31 '1')\n", value);
+        printf("camera enum     0x%08x   (VisionKit: low byte 0x31 '1' = 2 channels, else 1)\n", value);
     }
+}
+
+/* ---- 4. 卡自己的 XML（可选）------------------------------------------ */
+
+static void swap_words(unsigned char *p, size_t n)
+{
+    size_t i;
+    unsigned char t;
+
+    for (i = 0; i + 3 < n; i += 4) {
+        t = p[i]; p[i] = p[i + 3]; p[i + 3] = t;
+        t = p[i + 1]; p[i + 1] = p[i + 2]; p[i + 2] = t;
+    }
+}
+
+static int dump_card_xml(struct sg_capture_session *s, const char *dir, uint32_t timeout_ms)
+{
+    char url[SG_CARDXML_URL_LEN + 1], name[128], path[512], tmp[540];
+    uint32_t addr = 0, len = 0, i;
+    unsigned char *data;
+    int kind, swapped = 0, ret;
+    time_t t0;
+    FILE *f;
+
+    puts("== Card XML ==");
+    ret = sg_cardxml_read(s, SG_CARDXML_URL_ADDR(0), url, SG_CARDXML_URL_LEN, timeout_ms);
+    if (ret) {
+        printf("CardXML FAILED: read URL at 0x%x: %s (%d)\n", SG_CARDXML_URL_ADDR(0), strerror(-ret), ret);
+        return ret;
+    }
+    url[SG_CARDXML_URL_LEN] = 0;
+    kind = sg_cardxml_parse_url(url, name, sizeof name, &addr, &len);
+    if (kind < 0) {                       /* 字节序可能反了：每个字倒过来再试一次 */
+        swap_words((unsigned char *)url, SG_CARDXML_URL_LEN);
+        kind = sg_cardxml_parse_url(url, name, sizeof name, &addr, &len);
+        swapped = kind >= 0;
+        if (kind < 0) swap_words((unsigned char *)url, SG_CARDXML_URL_LEN);
+    }
+    printf("CardXML url raw:");
+    for (i = 0; i < 48; ++i) printf(" %02x", (unsigned char)url[i]);
+    printf("\n");
+    for (i = 0; i < SG_CARDXML_URL_LEN && url[i]; ++i)
+        if ((unsigned char)url[i] < 0x20 || (unsigned char)url[i] > 0x7e) url[i] = '?';
+    printf("CardXML url: %s%s\n", url, swapped ? "   (bytes swapped per word)" : "");
+    if (kind == SG_CARDXML_FILE) {
+        printf("CardXML FAILED: URL says the XML is a local file on the Windows PC (%s), not on the card\n", name);
+        return -ENOENT;
+    }
+    if (kind < 0) {
+        puts("CardXML FAILED: URL is not \"Local:<name>;<addr>;<len>\"");
+        return -EPROTO;
+    }
+    printf("CardXML file %s at 0x%08x, %u bytes; reading 4 bytes per mailbox request...\n", name, addr, len);
+    fflush(stdout);
+
+    data = malloc(len);
+    if (!data) return -ENOMEM;
+    t0 = time(NULL);
+    ret = sg_cardxml_read(s, addr, data, len, timeout_ms);
+    if (!ret && swapped) swap_words(data, len);
+    if (ret) {
+        printf("CardXML FAILED: read data: %s (%d)\n", strerror(-ret), ret);
+        free(data);
+        return ret;
+    }
+    snprintf(path, sizeof path, "%s/%s", dir, name);
+    snprintf(tmp, sizeof tmp, "%s.part", path);
+    f = fopen(tmp, "wb");
+    if (!f || fwrite(data, 1, len, f) != len || fclose(f) || rename(tmp, path)) {
+        ret = -errno;
+        printf("CardXML FAILED: write %s: %s (%d)\n", path, strerror(errno), ret);
+        if (f) remove(tmp);
+        free(data);
+        return ret ? ret : -EIO;
+    }
+    free(data);
+    printf("CardXML saved: %s (%u bytes, %ld s)\n", path, len, (long)(time(NULL) - t0));
+    return 0;
 }
 
 int main(int argc, char **argv)
 {
     const char *device = SG_DEFAULT_DEVICE;
+    const char *card_xml_dir = NULL;
     struct sg_linux_dev dev;
     struct sg_capture_io io;
     struct sg_capture_session session;
@@ -146,6 +231,8 @@ int main(int argc, char **argv)
     for (i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--device") && i + 1 < argc) {
             device = argv[++i];
+        } else if (!strcmp(argv[i], "--card-xml") && i + 1 < argc) {
+            card_xml_dir = argv[++i];
         } else {
             usage();
             return EXIT_OPEN_FAIL;
@@ -178,6 +265,9 @@ int main(int argc, char **argv)
 
     /* 预检失败也照样读这两个寄存器，它们能帮助判断原因。 */
     print_registers(&session, options.control_timeout_ms);
+
+    if (card_xml_dir && dump_card_xml(&session, card_xml_dir, options.control_timeout_ms) && !exit_code)
+        exit_code = EXIT_CARD_XML;
 
     sg_linux_close(&dev);
     return exit_code;

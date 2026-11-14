@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT
  *
  * cam_config.c —— cam_settings ⇄ 相机寄存器。
- * 只调 cam_serial 的 read32/write32；cam_serial 写好之前，这里每个函数都会返回 -ENOSYS。
+ * 只调 cam_serial 的 GenCP read32/write32（串口通道见 cam_serial.h）。
  *
  * ❓ 地址全部来自 8K 型号 XML（cam_regs.h 里标 [参考8K]），拿到 16K 的 XML 后核对。
  * ❓ User Set 槽位号（1..3）和"写 1 触发保存"也是按 GenICam 惯例写的，待核对。
@@ -23,12 +23,12 @@
 #define MAX_TEST_PATTERN    6
 #define USERSET_SAVE_CMD    1u
 
-static int rd(struct sg_capture_session *s, uint32_t addr, uint32_t *v)
+static int rd(struct cam_serial *s, uint32_t addr, uint32_t *v)
 {
     return cam_gencp_read32(s, addr, v, CAM_TIMEOUT_MS);
 }
 
-static int wr(struct sg_capture_session *s, uint32_t addr, uint32_t v)
+static int wr(struct cam_serial *s, uint32_t addr, uint32_t v)
 {
     return cam_gencp_write32(s, addr, v, CAM_TIMEOUT_MS);
 }
@@ -64,7 +64,7 @@ int cam_settings_check(const struct cam_settings *in)
     return 0;
 }
 
-int cam_get(struct sg_capture_session *s, struct cam_settings *out)
+int cam_get(struct cam_serial *s, struct cam_settings *out)
 {
     uint32_t width, period, exposure, trig, pattern;
     int ret;
@@ -87,7 +87,7 @@ int cam_get(struct sg_capture_session *s, struct cam_settings *out)
     return 0;
 }
 
-int cam_set(struct sg_capture_session *s, const struct cam_settings *in)
+int cam_set(struct cam_serial *s, const struct cam_settings *in)
 {
     uint32_t new_period, old_period, exposure_clk;
     int ret;
@@ -130,7 +130,7 @@ int cam_set(struct sg_capture_session *s, const struct cam_settings *in)
     return wr(s, CAM_REG_WIDTH, in->width);
 }
 
-int cam_save_user_set(struct sg_capture_session *s, unsigned slot)
+int cam_save_user_set(struct cam_serial *s, unsigned slot)
 {
     int ret;
 

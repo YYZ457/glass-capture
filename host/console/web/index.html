@@ -46,6 +46,7 @@
         <button data-action="probe" class="action" disabled><b>01</b><div><strong>检查板卡</strong><small>板型、内核、PCIe 身份和 SD 卡</small></div><span>↗</span></button>
         <button data-action="prepare" class="action" disabled><b>02</b><div><strong>从 SD 加载程序</strong><small>只读挂载 SD/glass-capture、校验、拷贝三个程序、加载驱动</small></div><span>↗</span></button>
         <button data-action="status" class="action" disabled><b>02½</b><div><strong>只读体检</strong><small>sg_status：驱动信息、预检五项、两个状态寄存器</small></div><span>↗</span></button>
+        <button data-action="card_xml" class="action" disabled><b>02¾</b><div><strong>读取采集卡 XML</strong><small>只读：从卡存储读出 SGCard.xml 存到电脑（1–2 分钟）</small></div><span>↗</span></button>
         <button data-action="preflight" class="action" disabled><b>03</b><div><strong>检查采集条件</strong><small>读取 DDR、CL1 时钟与图像格式</small></div><span>↗</span></button>
         <button data-action="capture" class="action capture" disabled><b>04</b><div><strong>采集一帧</strong><small>极速单帧采集 · 保存至板上内存</small></div><span>↗</span></button>
         <button data-action="fetch_last" class="action" disabled><b>05</b><div><strong>回传最新图像到电脑</strong><small>网口已配置走网口（约 1 秒），否则走 USB 串口（约 7 分钟）</small></div><span>📥</span></button>

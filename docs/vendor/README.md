@@ -9,7 +9,8 @@
 | `visionkit_sdk/` | SDK 头文件 + 3 页开发示例 PDF | ✅ 真实。API 列表见 `VkApiDefination.h` |
 | `genicam_xml_8k_reference/` | 3 份凌云光 SF 系列相机 GenICam XML | ✅ 真实，但**都不是我们这台**：SF6200-**CL08K**、SF6100-CL08K、SF3000-CL04K，传感器 8192 / 4096 宽 |
 | `agent_report_unverified.md` | 另一个 agent 写的集成报告 | ⚠️ 部分对、部分无依据，见文件开头的核对表 |
-| `reverse_engineering_2026-11-14.md` | 反汇编 XDMA.sys / VisionKit DLL 的结论（Gemini）| [逆向]：带出处地址；二进制不在仓库，Claude 只做了旁证 |
+| `reverse_engineering_2026-11-14.md` | 反汇编 XDMA.sys / VisionKit DLL 的结论 | [逆向]：第 1 部分 Gemini，第 2 部分 Claude 对着 `windows_bin/` 逐条复核和补充 |
+| `windows_bin/` | Windows 端原始二进制（XDMA.sys + PDB、virtualserial、LusterGraber、VisionKitApi 等）和 16K 相机彩页 PDF | ✅ 原文件，SHA256 与 Gemini 记录一致。**厂家文件，不得公开** |
 
 ## 关于相机的身份
 
@@ -39,3 +40,9 @@ SDK 会从相机本身"下载 XML"（`VkSetMaxBaudrateDownXmlSupport`），说�
    在 Windows 电脑上用 VisionKit 连一次 16K 相机，然后全盘搜 `SchemaVersion*CL16K*`，很可能就有了。
 2. **采集卡的 XML** `SGCard.xml`：`CameraWidth` 的真实地址在里面。逆向已证实 VisionKit 从卡存储读它（I2 第 5 节）。
 3. 两个设备的 `VkConfigSave` 输出文件：当前参数的完整快照。
+
+## 16K 相机彩页（`windows_bin/SF6200-CL16K-50M-10 凌云光.pdf`）
+
+产品宣传页，**没有寄存器表**。有用的事实：16384 × 2 像素、3.5 µm、50 kHz、Mono8 / 10bit、接口 **CameraLink Deca & Base**、
+支持逐点 FFC、ROI、Binning、TDI、功耗 < 12 W。
+满速 16384 × 50 kHz = 819 MB/s 只有 Deca 能传；Base（255 Mpx/s）在 16384 宽下最多约 15.5 kHz，正好够项目的 15.36 kHz，见 D002。

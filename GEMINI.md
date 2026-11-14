@@ -12,13 +12,14 @@
 
 ## 硬规则
 
-- **不要猜寄存器，不要试写寄存器。** 所有地址在 `include/sg3000_regs.h`，每条标了可信度（[逆向] = 反汇编得来、没在 Linux 跑过；新的逆向结论记到 `docs/vendor/reverse_engineering_*.md`，写明反汇编地址）。UART 分频寄存器（`SG_UART_*`）在哪个 BAR 没确认，**不要写**。写错卡的寄存器可能让卡进入异常状态。驱动和邮箱各有写白名单，不要放宽。
+- **不要猜寄存器，不要试写寄存器。** 所有地址在 `include/sg3000_regs.h`，每条标了可信度（[逆向] = 反汇编得来、没在 Linux 跑过；新的逆向结论记到 `docs/vendor/reverse_engineering_*.md`，写明反汇编地址）。驱动新加的相机串口白名单默认关闭（`cam_serial=1` 才放开），不要改成默认打开。Windows 原始二进制在 `docs/vendor/windows_bin/`，新结论要写反汇编地址。写错卡的寄存器可能让卡进入异常状态。驱动和邮箱各有写白名单，不要放宽。
 - **不要修改二进制文件**（D003）。改了代码就重新编译：`python tools/make_sd_bundle.py`。
 - **不要静默丢数据。** 队列满、候选截断、块号跳变都必须报出来（错误码或标志），这是整个项目的一贯做法。
 - **错误约定**：成功返回 0，失败返回负 errno（含义见 `include/sg_err.h`）。
 - **板上程序的输出文字不要改**：`host/console/transport.py` 和 `telemetry.py` 用正则解析它们（`DDRInitialStatus=`、`Saved complete Mono8 frame:`、`SGJSON {...}` 等）。
 - **串口命令必须是纯 ASCII**（`transport.py` 里发给板子的 shell 命令不能有中文）。
 - **`legacy/` 只读**，是迁移参照。
+- **驱动白名单改了要跑 `make -C board test`**（含 `driver_whitelist_test`）。
 - **检测算法 C 和 Python 两份必须一致**：`board/processing/sg_candidates.c` ↔ `host/detect/candidates.py`。改一边就改另一边。
 - 板上程序静态链接，不要依赖动态库或域名解析。
 

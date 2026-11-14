@@ -76,7 +76,8 @@ def board(tmp_path, monkeypatch):
     subprocess.run("sha256sum sg3000_rx.ko > SHA256SUMS", shell=True, cwd=legacy, check=True)
     shim = tmp_path / "shim"
     shim.mkdir()
-    for name, text in SHIMS.items():
+    shims = dict(SHIMS, hexdump='#!/bin/sh\n# 只模拟 hexdump -v -e FMT FILE：输出十六进制\nfor f; do :; done\nod -An -v -tx1 "$f"\n')
+    for name, text in shims.items():
         (shim / name).write_text(text)
         (shim / name).chmod(0o755)
     dev = tmp_path / "pci"
@@ -101,6 +102,8 @@ def board(tmp_path, monkeypatch):
     monkeypatch.setattr(T, "STREAM_APP", str(tmp_path / "board" / "sg3000-stream"))
     monkeypatch.setattr(T, "STATUS_APP", str(tmp_path / "board" / "sg_status"))
     monkeypatch.setattr(T, "BOARD_CAPTURES", str(tmp_path / "boardcap"))
+    monkeypatch.setattr(T, "CARD_XML_DIR", str(tmp_path / "board" / "card-xml"))
+    monkeypatch.setattr(T, "HEXDUMP", str(shim / "hexdump"))
 
     env = dict(os.environ, PATH=f"{shim}:{os.environ['PATH']}", SIM_SD=str(sd),
                SIM_DEVNODE=str(tmp_path / "devnode"))
@@ -130,6 +133,9 @@ def test_full_flow(board):
     job = run(console, "status")          # 假设备节点不是真驱动：退出码 2
     assert job["status"] == "error" and "打不开" in job["message"]
 
+    job = run(console, "card_xml")        # 同上：真程序打不开假设备
+    assert job["status"] == "error" and "打不开" in job["message"]
+
     job = run(console, "network", {"pc_ip": "127.0.0.1", "board_ip": ""})
     assert job["status"] == "success", job
 
@@ -151,3 +157,22 @@ def test_missing_bundle_is_explained(board):
     shutil.rmtree(tmp / "sd" / "glass-capture")
     job = run(console, "prepare")
     assert job["status"] == "error" and "glass-capture" in job["message"]
+
+
+def test_card_xml_fetched(board):
+    """sg_status --card-xml 存好文件后，中控台把它取回电脑、内容一致。"""
+    console, tmp = board
+    xml = b"<?xml version='1.0'?><RegisterDescription>" + bytes(range(256)) + b"</RegisterDescription>"
+    (tmp / "card.bin").write_bytes(xml)
+    fake = tmp / "board" / "sg_status"
+    fake.write_text("#!/bin/bash\n[ \"$1\" = --card-xml ] || exit 9\n"
+                    f"cp '{tmp / 'card.bin'}' \"$2/SGCard.zip\"\n"
+                    "echo \"CardXML saved: $2/SGCard.zip (300 bytes, 1 s)\"\n")
+    fake.chmod(0o755)
+    job = run(console, "card_xml")
+    assert job["status"] == "success", job
+    assert (tmp / "captures" / "card-xml" / "SGCard.zip").read_bytes() == xml
+
+    fake.write_text("#!/bin/bash\necho 'CardXML FAILED: URL is not \"Local:<name>;<addr>;<len>\"'\nexit 3\n")
+    job = run(console, "card_xml")
+    assert job["status"] == "error" and "URL is not" in job["message"]

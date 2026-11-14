@@ -46,30 +46,35 @@
 #define SG_MBX_WORD1_CARD        0u           /* [观察] 请求第 1 字：0 = 发给卡固件（下面串口邮箱是 0x10/0x12）*/
 
 /* ===== A. BAR0：Camera Link 串口邮箱（和上面的卡邮箱同构）[逆向] ======
- * 端口 0 = 0x4110xx（Windows 节点 \data_0/\data_1），端口 1 = 0x4130xx（\data_2/\data_3）。
+ * 端口 0 = 0x4110xx（Windows 节点 \\data_0/\\data_1），端口 1 = 0x4130xx（\\data_2/\\data_3）。
  * 报文 = 16 字节头（第 0 字 0x000155aa，第 1 字 SG_SER_WORD1，第 2 字 载荷长度|序号<<16，第 3 字 0）
  *        + 载荷，逐字写 TX_DATA，最后把"载荷长度+16"写 TX_LEN。
- * 驱动白名单目前**不允许**访问这些地址（旧 .ko 会返回 -EINVAL），见 docs/interfaces/I7。 */
+ * 卡邮箱 0x4120xx 的 +0x04/+0x08/+0x18/+0x28 也有同样的初始化（Windows 打开 \\grabber_0 时做），
+ * 本仓库的卡邮箱代码没做也能用，所以不加。
+ * 驱动白名单目前**不允许**访问串口这些地址（旧 .ko 会返回 -EINVAL），见 docs/interfaces/I7 第 4 节。 */
 #define SG_SER_PORTS             2u
 #define SG_SER_BASE(port)        (0x411000u + (uint32_t)(port) * 0x2000u)
-#define SG_SER_CTRL(port)        (SG_SER_BASE(port) + 0x04) /* 写 [逆向] 设完波特率后写 SG_SER_CTRL_BAUD_SET，含义未知 */
+#define SG_SER_CTRL(port)        (SG_SER_BASE(port) + 0x04) /* 读写 [逆向] = 0x04000000 表示已初始化 */
+#define SG_SER_FLUSH_A(port)     (SG_SER_BASE(port) + 0x08) /* 写 [逆向] 初始化时写 0xa5，含义推测为清 FIFO */
 #define SG_SER_TX_DATA(port)     (SG_SER_BASE(port) + 0x10) /* 写 [逆向] */
 #define SG_SER_TX_LEN(port)      (SG_SER_BASE(port) + 0x14) /* 写 [逆向] 总字节数 = 载荷 + 16，写入即发送 */
+#define SG_SER_FLUSH_B(port)     (SG_SER_BASE(port) + 0x18) /* 写 [逆向] 同 FLUSH_A */
 #define SG_SER_RX_OCCUPANCY(port) (SG_SER_BASE(port) + 0x1c) /* 读 [逆向] 非 0 = 有回包 */
 #define SG_SER_RX_DATA(port)     (SG_SER_BASE(port) + 0x20) /* 读 [逆向] */
 #define SG_SER_RX_LEN(port)      (SG_SER_BASE(port) + 0x24) /* 读 [逆向] 回包总字节数（含 16 字节头）*/
+#define SG_SER_FLUSH_C(port)     (SG_SER_BASE(port) + 0x28) /* 写 [逆向] 同 FLUSH_A */
 #define SG_SER_WORD1(port)       (0x10u + 2u * (uint32_t)(port)) /* [逆向] 端口 0 = 0x10，端口 1 = 0x12 */
-#define SG_SER_CTRL_BAUD_SET     0x04000000u  /* [逆向] */
+#define SG_SER_CTRL_READY        0x04000000u  /* [逆向] */
+#define SG_SER_FLUSH_VALUE       0xa5u        /* [逆向] */
 
-/* UART 分频寄存器（标准 16550 布局，与 Xilinx AXI UART16550 IP 的 0x1000 起始偏移吻合）。
- * ⚠️ 用的是哪个 BAR **未确认**：BAR1 的 0x1000 是 XDMA C2H 引擎，写错会弄乱 DMA。
- * 确认是 BAR0 之前，任何代码都不要写这几个地址。 */
+/* UART 分频寄存器：标准 16550 布局，偏移和 Xilinx AXI UART16550 IP 一致。[逆向]
+ * 在 BAR0：XDMA.sys 用的是 bar[userBarIdx]，和 0x4110xx、0x4120xx 同一个指针（I7 第 3 节）。 */
 #define SG_UART_BASE(port)       ((uint32_t)(port) << 16)
-#define SG_UART_DLL(port)        (SG_UART_BASE(port) + 0x1000) /* [逆向] 分频低 8 位（DLAB=1 时）*/
-#define SG_UART_DLM(port)        (SG_UART_BASE(port) + 0x1004) /* [逆向] 分频高 8 位（DLAB=1 时）*/
-#define SG_UART_LCR(port)        (SG_UART_BASE(port) + 0x100c) /* [逆向] bit7 = DLAB */
+#define SG_UART_DLL(port)        (SG_UART_BASE(port) + 0x1000) /* 分频低 8 位（DLAB=1 时）*/
+#define SG_UART_DLM(port)        (SG_UART_BASE(port) + 0x1004) /* 分频高 8 位（DLAB=1 时）*/
+#define SG_UART_LCR(port)        (SG_UART_BASE(port) + 0x100c) /* bit7 = DLAB */
 #define SG_UART_LCR_DLAB         0x80u
-#define SG_UART_CLOCK_HZ         200000000u   /* [逆向] 0xbebc200 */
+#define SG_UART_CLOCK_HZ         200000000u   /* 0xbebc200 */
 
 /* ===== A. BAR0：采集控制与块头 ====================================== */
 #define SG_ACQ_ARM               0x201000u    /* 写 [未知] 启动前写 2；驱动只允许写 2 */
@@ -100,7 +105,7 @@
 #define SG_PIXFMT_MONO8          0x01080001u  /* [观察] GenICam 风格的 Mono8 编码 */
 
 /* ===== C. 逻辑地址（只能经邮箱访问）================================= */
-#define SG_L_CAMERA_ENUM         0x10540010u  /* [逆向] VisionKit 枚举相机时读它，判 '1'(0x31)；含义推测为"相机在线"。只读 */
+#define SG_L_CAMERA_ENUM         0x10540010u  /* [逆向] 低字节 '1'(0x31) 时 VisionKit 认为卡有 2 路，否则 1 路。只读 */
 #define SG_L_DDR_STATUS          0x10540024u  /* [推测] 0 未初始化 / 2 已校准；实测 2 */
 #define SG_L_PIXEL_CLOCKS        0x10002020u  /* [推测] bit0 = Camera Link 时钟 1 有信号；实测 0x59，其余位未知 */
 /* 下面三条与 VisionKit 示例里的卡参数 ClConfiguration / CameraColorType / CameraPixelDepth
@@ -112,8 +117,8 @@
 #define SG_L_ACQ_STOP            0x10601018u  /* [观察] 写 = 停止采集 */
 /* 待找：卡参数 CameraWidth / CameraHeight / DeviceTapGeometry 的地址。
  * 已确认 Windows 软件每次都设置 CameraWidth，Linux 从未设置 → 卡报告 4096 的直接原因。
- * [逆向] VisionKit DLL 里没有这些地址常量，全部运行时从卡的 SGCard.xml 读出来，
- * 所以只有拿到 SGCard.xml 才知道地址。**不要试写**。 */
+ * [逆向] 地址都在卡自己的 XML 里，Linux 可以读出来：board/capture/sg_cardxml.h（URL 在逻辑地址 0x190）。
+ * 拿到 XML 之前**不要试写**。 */
 
 /* ===== B. BAR1：XDMA（只在 board/driver/ 里用）====================== */
 #define SG_XDMA_C2H              0x1000u      /* [观察] C2H 通道 0 */

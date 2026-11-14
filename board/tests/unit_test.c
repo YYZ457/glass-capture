@@ -17,6 +17,7 @@
 #include "sg_linecheck.h"
 #include "sg_pipeline.h"
 #include "cam_serial.h"
+#include "sg_cardxml.h"
 #include "sg3000_regs.h"
 
 static struct sg_image_view view(unsigned char *p, uint32_t w, uint32_t h)
@@ -156,6 +157,8 @@ static int ser_dma(void *c, uint32_t s, void *b, uint32_t l, uint32_t t) { (void
 static uint64_t ser_now(void *c) { (void)c; return SER.now; }
 static void ser_sleep(void *c, uint32_t ms) { (void)c; SER.now += ms; }
 
+static uint16_t be16(const unsigned char *p) { return (uint16_t)(p[0] << 8 | p[1]); }
+
 static void test_cam_serial(void)
 {
     struct sg_capture_io io = { NULL, ser_rd, ser_wr, ser_dma, ser_now, ser_sleep, NULL };
@@ -193,7 +196,7 @@ static void test_cam_serial(void)
     assert(cam_serial_send(&c, msg, 5) == 0);
     assert(SER.nwr == 7);
     for (i = 0; i < 6; ++i) assert(SER.wr_off[i] == 0x413010u);
-    assert(SER.wr_val[2] == (5u | 1u << 16));
+    assert(SER.wr_val[2] == 5u);          /* 第一包序号是 0 */
     assert(SER.wr_off[6] == 0x413014u && SER.wr_val[6] == 21);
 
     /* 接收：头 + 2 字载荷（有效 5 字节）*/
@@ -209,16 +212,47 @@ static void test_cam_serial(void)
     /* 没有回包：超时 */
     assert(cam_serial_recv(&c, buf, sizeof buf, &len, 20) == -ETIMEDOUT);
 
-    /* 还没实现的两层必须明确报 -ENOSYS */
-    assert(cam_serial_set_baud(&c, 115200) == -ENOSYS);
-    assert(cam_gencp_read32(&s, 0, &d, 10) == -ENOSYS);
+    /* GenCP 校验和：16 位反码求和 */
+    {
+        const unsigned char ck[4] = { 0x00, 0x01, 0xf2, 0x03 };
+        unsigned char pkt[40];
+        assert(cam_gencp_checksum(ck, 4) == (uint16_t)~0xf204u);
+        assert(cam_gencp_checksum(ck, 3) == (uint16_t)~0xf201u);
+        assert(cam_gencp_build_read(0x1234, 0x10010, 4, pkt, sizeof pkt) == 28);
+        assert(pkt[0] == 0x01 && pkt[1] == 0x00 && pkt[8] == 0x40 && pkt[9] == 0x01);
+        assert(pkt[10] == 0x08 && pkt[11] == 0x00 && pkt[13] == 12 && pkt[14] == 0x12 && pkt[15] == 0x34);
+        assert(pkt[21] == 0x01 && pkt[22] == 0x00 && pkt[23] == 0x10 && pkt[27] == 4);
+        assert(be16(pkt + 2) == cam_gencp_checksum(pkt + 6, 10));
+        assert(be16(pkt + 4) == cam_gencp_checksum(pkt + 6, 22));
+        assert(cam_gencp_build_write(7, 0x20, msg, 5, pkt, sizeof pkt) == 29);
+        assert(pkt[8] == 0x40 && pkt[9] == 0x00 && pkt[11] == 0x02 && pkt[13] == 13 && pkt[24] == 0x01);
+        assert(be16(pkt + 4) == cam_gencp_checksum(pkt + 6, 23));
+        assert(cam_gencp_build_write(7, 0x20, msg, 5, pkt, 28) == -ENOSPC);
+    }
     puts("cam_serial ok");
+}
+
+static void test_cardxml_url(void)
+{
+    char name[32];
+    uint32_t a = 0, l = 0;
+
+    assert(sg_cardxml_parse_url("Local:SGCard.zip;10200000;1A2b?SchemaVersion=1.0.0", name, sizeof name, &a, &l) == SG_CARDXML_LOCAL);
+    assert(!strcmp(name, "SGCard.zip") && a == 0x10200000u && l == 0x1a2bu);
+    assert(sg_cardxml_parse_url("Local:a b/c.xml;0;10", name, sizeof name, &a, &l) == 0 && !strcmp(name, "a_b_c.xml"));
+    assert(sg_cardxml_parse_url("File:SGCard.xml", name, sizeof name, &a, &l) == SG_CARDXML_FILE && !strcmp(name, "SGCard.xml"));
+    assert(sg_cardxml_parse_url("Local:x;12", name, sizeof name, &a, &l) == -EPROTO);
+    assert(sg_cardxml_parse_url("Local:x;12;0", name, sizeof name, &a, &l) == -EPROTO);
+    assert(sg_cardxml_parse_url("Local:x;1g;4", name, sizeof name, &a, &l) == -EPROTO);
+    assert(sg_cardxml_parse_url("acoL", name, sizeof name, &a, &l) == -EPROTO);
+    assert(SG_CARDXML_URL_ADDR(0) == 0x190u && SG_CARDXML_URL_ADDR(1) == 0x290u);
+    puts("cardxml url ok");
 }
 
 int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
-    test_view_stats(); test_candidates(); test_linecheck(); test_pipeline(); test_cam_serial();
+    test_view_stats(); test_candidates(); test_linecheck(); test_pipeline(); test_cam_serial(); test_cardxml_url();
     puts("unit: ALL PASS");
     return 0;
 }

@@ -55,6 +55,7 @@ python host/console/launch.py
 | 2 | 01 检查板卡 | "板卡身份检查通过" |
 | 3 | 02 从 SD 加载程序 | `sha256sum` 三行 `OK`，"已从 SD 卡校验并加载新程序" |
 | 4 | 02½ 只读体检 | 日志里 `== Driver ==` / `== Preflight ==` / `== Registers ==` 三段；`poisoned 0`；`Preflight passed.`；最后一行 `camera enum` 的值记下来（新加的，还不知道正常值） |
+| 4½ | 02¾ 读取采集卡 XML | 1–2 分钟后"采集卡 XML 已存到电脑：…\card-xml\…"。失败时把日志里 `== Card XML ==` 那段发给 Claude |
 | 5 | 03 检查采集条件 | `Preflight passed. Acquisition and DMA were not started.` |
 | 6 | 填电脑 IP `192.168.1.10`、板子 IP `192.168.1.20` → 配置网口并测试 | "网口已通：板子 → 电脑 192.168.1.10:8770" |
 | 7 | 04 采集一帧 | `Saved complete Mono8 frame: 4096 x 2000, 8192000 bytes ...` |
@@ -108,4 +109,4 @@ python -I host/detect/candidates.py D:\SG3000_Captures\某张图.pgm --threshold
 3. 采到的第一张图（PGM），以及遮住左半边的那张（V2 用）
 4. 盖镜头盖采的 2~3 张图（V3 用）
 5. 如果有：Windows 上 VisionKit 导出的**这台 16K 相机**的 GenICam XML（`cam_regs.h` 现在用的是 8K 型号的地址）
-6. 如果有：**采集卡的 `SGCard.xml`**（`CameraWidth` 的地址在里面，见 I2 第 5 节）
+6. **「02¾ 读取采集卡 XML」读到的文件**（`D:\SG3000_Captures\card-xml\` 里；`CameraWidth` 的地址在里面，见 I2 第 5 节）

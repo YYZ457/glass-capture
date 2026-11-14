@@ -37,6 +37,7 @@
 #include "sg_acq.h"
 #include "pgm_write.h"
 #include "tx_tcp.h"
+#include "cam_serial.h"
 #include "sg_err.h"
 
 #define VERSION_TEXT     "sg3000-capture 1.0 ABI 1"
@@ -56,6 +57,7 @@ static void usage(void)
     puts("Usage: sg3000-capture preflight [--device PATH]\n"
          "       sg3000-capture capture --output PATH [--device PATH] [--timeout-ms 1..60000] [--send IP[:PORT]]\n"
          "       sg3000-capture send FILE.pgm --to IP[:PORT]\n"
+         "       sg3000-capture camera-probe [--device PATH] [--port 0|1] [--baud N]\n"
          "       sg3000-capture version\n"
          "Default device: /dev/sg3000_rx_0000:01:00.0\n"
          "Capture explicitly enables the experimental port-0 acquisition sequence.");
@@ -130,6 +132,58 @@ static int send_main(int argc, char **argv)
     return ret ? 1 : 0;
 }
 
+/* GenCP 标准的设备信息寄存器（Technology Agnostic Bootstrap Register Map，[GenCP 标准]，待相机实测）。 */
+#define GENCP_MANUFACTURER_NAME 0x0004u
+#define GENCP_MODEL_NAME        0x0044u
+#define GENCP_STRING_LEN        64u
+
+static void print_gencp_string(const char *label, const unsigned char *b)
+{
+    unsigned i;
+
+    printf("%s=", label);
+    for (i = 0; i < GENCP_STRING_LEN && b[i]; ++i) putchar(b[i] >= 0x20 && b[i] < 0x7f ? b[i] : '?');
+    putchar('\n');
+}
+
+/* sg3000-capture camera-probe：初始化 Camera Link 串口、设波特率、用 GenCP 读相机厂商和型号。
+ * 需要新驱动且 insmod 时带 cam_serial=1（旧驱动会报 Invalid argument (-22)）。 */
+static int camera_main(int argc, char **argv)
+{
+    const char *device = SG_DEFAULT_DEVICE;
+    unsigned port = 0;
+    unsigned long baud = 9600;
+    unsigned char name[GENCP_STRING_LEN];
+    struct sg_capture_session session;
+    struct sg_capture_io io;
+    struct sg_linux_dev dev;
+    static struct cam_serial ser;
+    int i, ret;
+
+    for (i = 2; i < argc; ++i) {
+        if (!strcmp(argv[i], "--device") && i + 1 < argc) device = argv[++i];
+        else if (!strcmp(argv[i], "--port") && i + 1 < argc) port = (unsigned)strtoul(argv[++i], NULL, 10);
+        else if (!strcmp(argv[i], "--baud") && i + 1 < argc) baud = strtoul(argv[++i], NULL, 10);
+        else { usage(); return 2; }
+    }
+    ret = sg_linux_open(&dev, device, &interrupted);
+    if (ret) goto out;
+    sg_linux_io(&dev, &io);
+    if (!(ret = sg_capture_session_init(&session, &io)) &&
+        !(ret = cam_serial_open(&ser, &session, port)) &&
+        !(ret = cam_serial_set_baud(&ser, (uint32_t)baud))) {
+        printf("CameraProbe port=%u baud=%lu\n", port, baud);
+        ret = cam_gencp_read(&ser, GENCP_MANUFACTURER_NAME, name, sizeof name, 1000);
+        if (!ret) print_gencp_string("CameraManufacturer", name);
+        if (!ret) ret = cam_gencp_read(&ser, GENCP_MODEL_NAME, name, sizeof name, 1000);
+        if (!ret) print_gencp_string("CameraModel", name);
+    }
+    sg_linux_close(&dev);
+out:
+    if (ret) fprintf(stderr, "Failed: %s (%d)\n", strerror(-ret), ret);
+    return ret ? 1 : 0;
+}
+
 int main(int argc, char **argv)
 {
     const char *device = SG_DEFAULT_DEVICE;
@@ -158,6 +212,9 @@ int main(int argc, char **argv)
     }
     if (!strcmp(argv[1], "send")) {
         return send_main(argc, argv);
+    }
+    if (!strcmp(argv[1], "camera-probe")) {
+        return camera_main(argc, argv);
     }
     capture = !strcmp(argv[1], "capture");
     if (!capture && strcmp(argv[1], "preflight")) {

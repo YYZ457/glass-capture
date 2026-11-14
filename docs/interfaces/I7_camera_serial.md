@@ -1,104 +1,122 @@
 # I7 · 相机控制（GenCP over Camera Link 串口）
 
-可信度标记同 I2。本文新增的 **[逆向]** = 反汇编 Windows 驱动和 DLL 得来，出处见 `docs/vendor/reverse_engineering_2026-11-14.md`，还没在 Linux 上跑过。
+可信度标记同 I2。**[逆向]** 表示照 Windows 驱动和 DLL 的反汇编写的，出处地址见 `docs/vendor/reverse_engineering_2026-11-14.md` 第 2 部分。这类内容还没在 Linux 上跑过。
 
-## 1. 整条链路
+## 1. 整条链路和状态
 
 ```
-cam_config（宽度、行频、曝光……）  地址表 cam_regs.h [参考8K]
-   │ cam_gencp_read32 / write32          ⬜ 缺 GenCP 串口帧的校验算法
-GenCP 二进制帧
-   │ cam_serial_send / recv              🟡 已写，假卡测过
-SG3000 串口邮箱 0x4110xx / 0x4130xx [逆向]
-   │ 驱动 sg3000_rx.ko                  ⬜ 白名单还没放开
+cam_config（宽度、行频、曝光……）      地址表 cam_regs.h [参考8K]          🟡
+   │ cam_gencp_read32 / write32           GenCP 包 + 反码校验和 [逆向]          🟡 纯函数有测试
+   │ cam_serial_send / recv               串口邮箱 0x4110xx / 0x4130xx [逆向]   🟡 有测试
+   │ cam_serial_open / set_baud           初始化 + UART16550 分频（BAR0）[逆向]  🟡
+   │ 驱动 sg3000_rx.ko                    白名单已写，默认关；新 .ko 未编译       ⬜
 采集卡 FPGA 里的 UART16550 → Camera Link 串口线 → 相机
 ```
 
-## 2. 串口邮箱（和卡邮箱 0x4120xx 同构）[逆向]
+板上试验命令：`sg3000-capture camera-probe [--port 0] [--baud 9600]`。它会读 GenCP 标准设备信息里的厂商名（0x0004）和型号（0x0044），并打印 `CameraManufacturer=` 和 `CameraModel=` 两行。
+
+## 2. 串口邮箱 [逆向]
 
 | | 端口 0 | 端口 1 |
 |---|---|---|
-| 基址 | `0x411000` | `0x413000` |
+| 基址（BAR0）| `0x411000` | `0x413000` |
 | Windows 节点 | `\data_0` / `\data_1` | `\data_2` / `\data_3` |
 | 请求第 1 字 | `0x10` | `0x12` |
 
 | 偏移 | 方向 | 作用 |
 |---|---|---|
-| +0x04 | 写 | 设完波特率后写 `0x04000000`，含义未知 |
+| +0x04 | 读写 | = `0x04000000` 表示已初始化 |
+| +0x08、+0x18、+0x28 | 写 | 初始化时写 `0xa5`（推测是清 FIFO）|
 | +0x10 | 写 | 发送数据，逐字写 |
 | +0x14 | 写 | 发送总字节数 = 载荷 + 16，写入即发出 |
 | +0x1c | 读 | 非 0 = 有回包 |
 | +0x20 | 读 | 回包数据，逐字读 |
-| +0x24 | 读 | 回包总字节数（含 16 字节头） |
+| +0x24 | 读 | 回包总字节数（含 16 字节头）|
 
-**发送报文**：16 字节头，后面接载荷，全部小端 32 位字。
-- 第 0 字 `0x000155aa`
-- 第 1 字 `0x10` 或 `0x12`
-- 第 2 字 `载荷长度 | 序号<<16`
-- 第 3 字 `0`
-- 载荷最后一个字不足 4 字节时补 0。补 0 是 [推测]，按卡邮箱的做法。
+**打开**（`cam_serial_open`）：
+1. 读 +0x04，已经是 `0x04000000` 就直接返回。
+2. 否则最多 3 轮：往 +0x28、+0x18、+0x08 各写 `0xa5`，再读 +0x1c，读到 0 就停。
+3. 最后写 +0x04 = `0x04000000`。
 
-**回包**：
-1. 先读 4 字头。
-2. 头第 0 字低 16 位是 `0x55aa` 时，载荷长度取头偏移 8 处的 u16；否则取"总字节数 − 16"。
+**发送**：
+- 包头 4 个字：`0x000155aa`、`0x10` 或 `0x12`、`载荷长度 | 序号<<16`（序号第一包是 0）、`0`。
+- 接着写载荷，小端 32 位字，不足补 0。
+- 最后写 TX_LEN。
 
-代码在 `board/camera_ctrl/cam_serial.c`：`cam_serial_pack`、`cam_serial_payload_len`、`cam_serial_send`、`cam_serial_recv`。单元测试在 `board/tests/unit_test.c`。
+**接收**：
+1. 读 4 个字的头。头第 0 字低 16 位是 `0x55aa` 时，载荷长度取头偏移 8 处的 u16；否则取"总长度 − 16"。
+2. 再读 ceil(载荷长度 / 4) 个字。
 
 ## 3. 波特率 [逆向]
 
+UART 是标准 16550，即 Xilinx AXI UART16550 IP，位置在 **BAR0 的 `(端口 << 16) + 0x1000`**：
+- DLL：+0x1000
+- DLM：+0x1004
+- LCR：+0x100c
+
+**为什么确定是 BAR0**：Windows 驱动写分频寄存器和写 0x4110xx 用的是同一个指针 `bar[userBarIdx]`，而 0x4110xx 只能落在 16 MiB 的 BAR0。
+
+写入顺序（`cam_serial_set_baud`，逐条照 XDMA.sys）：
+1. 读 LCR。
+2. LCR 置 bit7（DLAB = 1）。
+3. DLL 写 `0xff`。原因未知，照抄。
+4. DLM 写分频值高 8 位。
+5. DLL 写分频值低 8 位。
+6. LCR 写回原值。
+7. 读串口邮箱 +0x04，bit26 没置位就写 `0x04000000`。
+
+- 分频值 = (200 MHz + 8·baud) / (16·baud)。
 - 只接受 9600 / 19200 / 38400 / 57600 / 115200 / 230400 / 460800 / 921600。
-- 分频值 = (200 MHz + 8·baud) / (16·baud)，由 `cam_uart_divisor()` 计算。
-- **921600 误差 −3.1%，不要用。** 相机支持的最高 460800，误差 +0.47%。
+- **921600 误差 −3.1%，不要用。** 相机支持的最高档 460800 误差 +0.47%。
+- 相机上电默认波特率按 Camera Link 惯例应是 9600，待实测。VisionKit 枚举相机时会逐个波特率尝试（`EnumCameraByBaudRate`）。
 
-写入顺序。下面的"UART 基址"= 端口号 << 16：
-1. LCR（基址 + 0x100c）置 bit7，即 DLAB = 1。
-2. DLM（基址 + 0x1004）写分频值高 8 位。
-3. DLL（基址 + 0x1000）写分频值低 8 位。
-4. LCR 清 bit7。
-5. 串口邮箱 +0x04 写 `0x04000000`。
+## 4. GenCP 帧 [逆向]
 
-偏移和 Xilinx AXI UART16550 IP 的寄存器表完全一致，所以卡上 FPGA 用的就是这个标准 IP。
+完整字节表见逆向记录 2.4 节。要点：
+- 全部字段大端。
+- 读命令 `0x0800`，flags `0x4001`；写命令 `0x0802`，flags `0x4000`。
+- 应答命令 `0x0801` / `0x0803`。相机忙时先回 `0x0805`（PendingAck），按它给的毫秒数延长等待。
+- 校验和是 16 位反码求和，不是 CRC16：
+  - CCD 校验和覆盖字节 6..15；
+  - SCD 校验和覆盖字节 6 到包尾。
+- 应答的状态码必须为 0，请求号必须和请求一致；VisionKit 不检查应答的校验和，本仓库也不检查。
+- 相机寄存器值是大端 32 位（相机 XML `BigEndian`）。
 
-⚠️ **卡点：这几个地址在哪个 BAR，还没确认。** BAR1 的 0x1000 是 XDMA C2H 引擎，往那里写会弄乱 DMA。按推断，AXI 总线上的 IP 应该在 BAR0，但必须先在 `XDMA.sys` `0x140003150` 处核对 `bar` 指针的来源。`cam_serial_set_baud()` 在确认之前恒返回 `-ENOSYS`。
+## 5. 驱动白名单（`board/driver/sg3000_rx.c`）
 
-相机上电默认波特率多半是 9600，这是 Camera Link 惯例，待确认。如果卡上 UART 的默认分频也是 9600，不设波特率可能就能通信。这也要实测。
+- **默认关闭。** 新 `.ko` 不带参数加载时，行为和旧驱动完全一样。
+- 加载时写 `insmod sg3000_rx.ko cam_serial=1`，才放开下表这些地址：
 
-## 4. 驱动白名单要放开什么（上线前提）
-
-板上现在用的旧 `.ko` 只认卡邮箱。`cam_serial_send/recv` 在旧驱动上会得到 `-EINVAL`，不会碰硬件。要让串口在 Linux 上工作，`board/driver/sg3000_rx.c` 的 `sg_reg_allowed()` 需要**只加**下面这些，并重新编译 `.ko`（`board/driver/module.sh`，需要板子内核源码树）：
-
-| 方向 | 地址（端口 0；端口 1 加 0x2000） | 限制 |
+| 方向 | 地址（端口 0；端口 1 = +0x2000）| 允许的值 |
 |---|---|---|
-| 写 | 0x411010 | — |
-| 写 | 0x411014 | 值 17..16+512 |
-| 写 | 0x411004 | 值只能是 0x04000000（设波特率才需要） |
-| 读 | 0x41101c、0x411020、0x411024 | — |
-| 读写 | BAR0 0x1000、0x1004、0x100c（端口 1：0x11000…） | **BAR 确认后才加**；LCR 只允许改 bit7 |
+| 写 | 0x411004 | 只能 0x04000000 |
+| 写 | 0x411008、0x411018、0x411028 | 只能 0xa5 |
+| 写 | 0x411010 | 任意 |
+| 写 | 0x411014 | 17..528 |
+| 读 | 0x411004、0x41101c、0x411020、0x411024 | — |
+| 写 | BAR0 0x1000、0x1004、0x100c（端口 1：0x11000…）| ≤ 0xff |
+| 读 | BAR0 0x100c（端口 1：0x1100c）| — |
 
-## 5. GenCP 帧（载荷里装什么）
-
-- VisionKit 走标准 EMVA GenCP 二进制协议，preamble `0x0100`。
-- **还缺**：串口版 GenCP 帧前缀里两个 CRC16 的算法和字节序。两种来源：
-  - EMVA 官网免费下载的 GenCP 标准文档；
-  - 让 Gemini 在 `VisionKitApi.dll` 里找组 GenCP 包、算校验的函数。
-- 有了它就能写 `cam_gencp_read32/write32`：ReadMem / WriteMem 命令。cam_config 已经写好，压在这两个函数上面。
-- 相机寄存器地址：`board/camera_ctrl/cam_regs.h`，全部 [参考8K]，要用 16K 相机自己的 XML 核对。
+白名单逻辑由 `board/tests/driver_whitelist_test.c` 在电脑上编译测试（`make -C board test`）。
+`.ko` 本身要用板子的内核树编译（`board/driver/module.sh`），仓库里没有内核树，这一步还没做。
 
 ## 6. 已证伪
 
 | 说法 | 结论 |
 |---|---|
 | 波特率分频"250 或 50" | ❌ 那是 `virtualserial.dll` 里的毫秒超时 |
-| 用 JAI ASCII 短命令（`WN`、`LR`、`SBDRT`……）配置相机 | ❌ VisionKit 全部二进制 0 命中。相机固件可能仍留着 ASCII 口，可在 Windows 串口终端发 `ID?` 试，但不是第一路线 |
+| 用 JAI ASCII 短命令（`WN`、`LR`、`SBDRT`……）配置相机 | ❌ VisionKit 全部二进制 0 命中 |
+| GenCP 串口帧用 CRC16 | ❌ 是 16 位反码求和 |
+| 分频寄存器可能在 BAR1 | ❌ 在 BAR0（第 3 节）|
 
 ## 7. 短期替代（不写代码）
 
-在 Windows 上用 VisionKit 设好相机：宽度 16384、行频、曝光、`ClConfiguration`、Tap、像素时钟。然后存进 User Set，并设为上电默认（`UserSetSave` / `UserSetDefault`）。
-相机之后每次上电自动用这套参数，Linux 端暂时不需要串口。
+在 Windows 上用 VisionKit 把相机设好：宽度 16384、行频、曝光、`ClConfiguration`、Tap、像素时钟。然后存进 User Set，并设为上电默认（`UserSetSave` / `UserSetDefault`）。
 
 ## 8. 待办（按顺序）
 
-- [ ] Windows：核对 `XDMA.sys` `0x140003150` 的 `bar` 是不是 BAR0
-- [ ] 拿到 GenCP 串口帧的 CRC 算法
-- [ ] 改驱动白名单（第 4 节），重新编译 `.ko`，上板跑 `cam_serial`
-- [ ] 16K 相机的 XML，核对 `cam_regs.h`
+- [ ] 用板子内核树编译新 `.ko`（`module.sh`），通过 `verify_module.py` 的 ABI 检查
+- [ ] 板上：`insmod sg3000_rx.ko cam_serial=1`，然后运行 `sg3000-capture camera-probe`，看能不能读出相机型号
+- [ ] 读不出时依次试 `--baud 115200`、`--baud 460800`、`--port 1`
+- [ ] 16K 相机的 XML：GenCP 能通以后，可以从相机本身读出（GenCP 清单表）
+- [ ] 核对 `cam_regs.h`，然后启用 `cam_config`

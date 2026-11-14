@@ -89,15 +89,64 @@ static void sg_release(struct kref *ref)
     kfree(d);
 }
 
+/* WHITELIST-BEGIN —— board/tests/driver_whitelist_test.c 会把这一段抽出来在电脑上编译测试 */
+
+/* 相机串口（docs/interfaces/I7 第 4 节）。默认关闭：insmod sg3000_rx.ko cam_serial=1 才放开。
+ * 关闭时这个驱动和旧版完全一样。 */
+static bool cam_serial;
+
+/* 串口邮箱 0x4110xx / 0x4130xx 内的偏移（-1 = 不是串口地址）；UART 寄存器 (port<<16)+0x1000.. 同理 */
+static int sg_ser_reg(u32 off)
+{
+    if (off >= 0x411000 && off < 0x411030) return (int)(off - 0x411000);
+    if (off >= 0x413000 && off < 0x413030) return (int)(off - 0x413000);
+    return -1;
+}
+
+static int sg_uart_reg(u32 off)
+{
+    if (off >= 0x1000 && off <= 0x100c) return (int)(off - 0x1000);
+    if (off >= 0x11000 && off <= 0x1100c) return (int)(off - 0x11000);
+    return -1;
+}
+
 static bool sg_reg_allowed(u32 off, bool write)
 {
+    int r;
+
     if (off & 3) return false;
+    if (cam_serial) {
+        r = sg_ser_reg(off);
+        if (r >= 0)
+            return write ? (r == 0x04 || r == 0x08 || r == 0x10 || r == 0x14 || r == 0x18 || r == 0x28)
+                         : (r == 0x04 || r == 0x1c || r == 0x20 || r == 0x24);
+        r = sg_uart_reg(off);
+        if (r >= 0)
+            return write ? (r == 0x0 || r == 0x4 || r == 0xc) : r == 0xc;
+    }
     if (write)
         return off == 0x412010 || off == 0x412014 || off == 0x202000 || off == 0x201000;
     if (off == 0x41200c || off == 0x41201c || off == 0x412020 || off == 0x412024)
         return true;
     return (off >= 0x202008 && off <= 0x20206c) || off == 0x202098 || off == 0x20209c;
 }
+
+/* 允许写的地址里，哪些值能写。前提：sg_reg_allowed(off, true) 已经通过。 */
+static bool sg_reg_value_allowed(u32 off, u32 value)
+{
+    int r;
+
+    if (off == 0x201000) return value == 2;
+    if (off == 0x202000) return value == U32_MAX;
+    if (off == 0x412014) return value == 28 || value == 32;
+    r = sg_ser_reg(off);
+    if (r == 0x04) return value == 0x04000000;
+    if (r == 0x08 || r == 0x18 || r == 0x28) return value == 0xa5;
+    if (r == 0x14) return value > 16 && value <= 16 + 512;
+    if (sg_uart_reg(off) >= 0) return value <= 0xff;
+    return true;
+}
+/* WHITELIST-END */
 
 static int sg_dma_read(struct sg_dev *d, struct sg_dma *x)
 {
@@ -178,9 +227,7 @@ static long sg_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
             reg.value = readl(d->bar0 + reg.offset);
             if (copy_to_user(user, &reg, sizeof(reg))) ret = -EFAULT;
         } else {
-            if ((reg.offset == 0x201000 && reg.value != 2) ||
-                (reg.offset == 0x202000 && reg.value != U32_MAX) ||
-                (reg.offset == 0x412014 && reg.value != 28 && reg.value != 32)) { ret = -EINVAL; break; }
+            if (!sg_reg_value_allowed(reg.offset, reg.value)) { ret = -EINVAL; break; }
             writel(reg.value, d->bar0 + reg.offset);
         }
         break;
@@ -310,6 +357,8 @@ MODULE_DEVICE_TABLE(pci, sg_ids);
 static struct pci_driver sg_driver = { .name = "sg3000_rx", .id_table = sg_ids,
     .probe = sg_probe, .remove = sg_remove };
 module_pci_driver(sg_driver);
+module_param(cam_serial, bool, 0444);
+MODULE_PARM_DESC(cam_serial, "Allow Camera Link serial mailbox and UART registers (default off)");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Experimental SG3000 single-channel bounded C2H receiver");
 MODULE_VERSION("0.1");

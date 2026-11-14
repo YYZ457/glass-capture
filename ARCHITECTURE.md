@@ -48,7 +48,7 @@ apps ─▶ stream ─▶ processing
 
 | 文件 | 职责 | 状态 |
 |---|---|---|
-| `sg3000_rx.c` | PCIe 绑定、BAR 映射、寄存器白名单、DMA、出错隔离 | ✅ 原样迁入（315 行，不拆）|
+| `sg3000_rx.c` | PCIe 绑定、BAR 映射、寄存器白名单、DMA、出错隔离 | ✅ 原样迁入；2026-11-14 加相机串口白名单，**默认关闭**（`insmod ... cam_serial=1` 才放开）。新 .ko 还没编译（缺板子内核树），白名单逻辑电脑上单独测过 |
 | `Kbuild`、`module.sh`、`verify_module.py` | 构建 .ko 并检查目标内核 ABI | ✅ 仅改路径 |
 
 ### board/capture/ — 和卡的固件对话（原 `sg3000_capture_core.c` 拆成 5 份）
@@ -60,6 +60,7 @@ apps ─▶ stream ─▶ processing
 | `sg_preflight` | 只读体检 | 🟡 已写，电脑上假卡测试通过，未上板 |
 | `sg_block` | 块头读取、校验（纯函数）、分块 DMA | 🟡 已写，电脑上假卡测试通过，未上板 |
 | `sg_acq` | 开始 / 取块 / 停止状态机，单帧便捷函数 | 🟡 已写，电脑上假卡测试通过，未上板 |
+| `sg_cardxml` | 从卡存储读出卡自己的 GenICam XML（URL 在逻辑地址 0x190）| 🟡 [逆向]，假卡测过；只用邮箱读，旧驱动即可 |
 | `sg_io_linux` | 回调表的 ioctl 实现（原来两个程序各抄一份，现合并）| 🟡 已写，只能上板验证 |
 
 ### board/processing/ — 一块像素进，一个结果出
@@ -84,7 +85,7 @@ apps ─▶ stream ─▶ processing
 | 文件 | 职责 | 状态 |
 |---|---|---|
 | `cam_regs.h` | 相机寄存器地址 | 🟡 来自同系列 8K 型号 XML，待 16K 确认 |
-| `cam_serial` | 串口邮箱收发 + GenCP 读写一个寄存器 | 🟡 收发已写（地址 [逆向]，假卡测过，需新驱动放开白名单）；⬜ 波特率（BAR 未确认）、GenCP（缺 CRC 算法）。见 I7 |
+| `cam_serial` | 串口邮箱初始化 / 收发 / 波特率 + GenCP 读写 | 🟡 全部照反汇编写完（[逆向]），纯函数和收发有测试；需新驱动 `cam_serial=1`。见 I7 |
 | `cam_config` | 宽度、行频、曝光、触发、测试图案、User Set | 🟡 已写在 cam_serial 之上；地址待 16K XML 核对 |
 
 ### board/transport/
@@ -98,8 +99,8 @@ apps ─▶ stream ─▶ processing
 
 | 文件 | 程序 | 状态 |
 |---|---|---|
-| `sg_status.c` | `sg_status` 只读体检 | 🟡 已写，只能上板验证 |
-| `sg_capture_main.c` | `sg3000-capture` 单帧；`send` 经网口发图；`version` | 🟡 已写，上板后与 legacy 逐字节对比 |
+| `sg_status.c` | `sg_status` 只读体检；`--card-xml DIR` 读卡 XML | 🟡 已写，只能上板验证 |
+| `sg_capture_main.c` | `sg3000-capture` 单帧；`send` 经网口发图；`camera-probe` 经串口读相机型号；`version` | 🟡 已写，上板后与 legacy 逐字节对比 |
 | `sg_stream_main.c` | `sg3000-stream` 连续；`--processor candidates`、`--tcp` | 🟡 已迁移，合成源跑通；硬件源没上板 |
 | `pgm_write` | 原子写 PGM | 🟡 已写，电脑上测试通过 |
 

@@ -14,6 +14,7 @@
 #include "sg_acq.h"
 #include "sg_mailbox.h"
 #include "sg_block.h"
+#include "sg_cardxml.h"
 #include "sg3000_regs.h"
 #include "pgm_write.h"
 #include "sg_err.h"
@@ -34,6 +35,22 @@ struct card {
     int dma_calls;
 };
 static struct card C;
+
+/* 假卡存储：0x190 起是 URL 字符串，0x4000 起是 10 字节的"XML" */
+static const char CARD_URL[] = "Local:SGCard.xml;4000;a?SchemaVersion=1.0.0";
+static const char CARD_XML[] = "<xml>12345";
+static uint32_t storage_word(uint32_t addr)
+{
+    uint32_t v = 0, i;
+    for (i = 0; i < 4; ++i) {
+        uint32_t a = addr + i;
+        unsigned char b = 0;
+        if (a >= 0x190 && a - 0x190 < sizeof CARD_URL) b = (unsigned char)CARD_URL[a - 0x190];
+        if (a >= 0x4000 && a - 0x4000 < sizeof CARD_XML - 1) b = (unsigned char)CARD_XML[a - 0x4000];
+        v |= (uint32_t)b << (8 * i);
+    }
+    return v;
+}
 
 static uint32_t hdr_val(uint32_t off)
 {
@@ -69,6 +86,7 @@ static void card_process_mailbox(void)
         case SG_L_CL_CONFIG: val = 0; break;
         case SG_L_CAMERA_COLOR: val = 0; break;
         case SG_L_CAMERA_DEPTH: val = 8; break;
+        default: val = storage_word(addr); break;
     }
     memset(C.rx, 0, sizeof(C.rx));
     C.rx[0] = 0x000055aa; C.rx[1] = 1;
@@ -160,6 +178,21 @@ int main(void)
     CHECK(sg_capture_preflight(&s, 1000, &p) == 0);
     CHECK(p.ddr_status == 2 && p.pixel_clocks == 0x59 && p.camera_depth == 8 && p.valid_mask == 31);
     CHECK(sg_capture_preflight(&s, 0, &p) == -EINVAL && sg_capture_preflight(&s, 2001, &p) == -EINVAL);
+
+    /* 3b. 读卡存储（sg_cardxml）：URL 字节顺序、解析、按地址读出文件 */
+    {
+        char url[SG_CARDXML_URL_LEN + 1], name[64], xml[16];
+        uint32_t a, l;
+        reset(); sg_capture_session_init(&s, &IO);
+        CHECK(sg_cardxml_read(&s, SG_CARDXML_URL_ADDR(0), url, SG_CARDXML_URL_LEN, 1000) == 0);
+        url[SG_CARDXML_URL_LEN] = 0;
+        CHECK(!strcmp(url, CARD_URL));
+        CHECK(sg_cardxml_parse_url(url, name, sizeof name, &a, &l) == SG_CARDXML_LOCAL && a == 0x4000 && l == 10);
+        memset(xml, 0, sizeof xml);
+        CHECK(sg_cardxml_read(&s, a, xml, l, 1000) == 0 && !memcmp(xml, CARD_XML, 10) && xml[10] == 0);
+        CHECK(s.request_id == 64 + 3 && C.regs_written_bad == 0);
+        CHECK(sg_cardxml_read(&s, 0x191, xml, 4, 1000) == -EINVAL);
+    }
 
     /* 4. 块头检查（纯函数） */
     struct sg_block_header h = { .width = W, .lines = MAXL, .pixfmt = SG_PIXFMT_MONO8, .seq = 1,
