@@ -115,8 +115,35 @@ UART 是标准 16550，即 Xilinx AXI UART16550 IP，位置在 **BAR0 的 `(端�
 
 ## 8. 待办（按顺序）
 
-- [ ] 用板子内核树编译新 `.ko`（`module.sh`），通过 `verify_module.py` 的 ABI 检查
-- [ ] 板上：`insmod sg3000_rx.ko cam_serial=1`，然后运行 `sg3000-capture camera-probe`，看能不能读出相机型号
-- [ ] 读不出时依次试 `--baud 115200`、`--baud 460800`、`--port 1`
-- [ ] 16K 相机的 XML：GenCP 能通以后，可以从相机本身读出（GenCP 清单表）
-- [ ] 核对 `cam_regs.h`，然后启用 `cam_config`
+### 8.1 编译新 `.ko`（Windows 电脑上的 Linux 编译环境）
+
+材料已经在你电脑上，见 `docs/legacy/使用说明.md` 第 49 行：
+- 内核树和编译环境：`D:\CodexData\visionkit_zcu102\linux_build_vm`（linux-xlnx，提交 `b0c1be30…`）
+- 板子内核的 Image 和 symbols.json：`D:\CodexData\visionkit_zcu102\boot_2022_1\kernel_analysis`
+
+在那个 Linux 环境里，仓库根目录下运行：
+
+```
+KDIR=<准备好的内核树> KERNEL_ANALYSIS=<kernel_analysis 目录> CROSS_COMPILE=aarch64-none-elf- sh board/driver/module.sh
+```
+
+- 必须看到 `Compile and target ABI checks passed.`；ABI 检查不过，就不要上板。
+- 打包：`python tools/make_sd_bundle.py --ko board/driver/output/module/sg3000_rx.ko`。这样 `.ko` 会进 `dist/glass-capture/` 和 `SHA256SUMS`，中控台会优先加载它。
+
+### 8.2 上板：先确认新驱动和旧驱动行为一样，再开串口
+
+1. **新驱动不带参数**：照常 02 → 02½ → 04。结果必须和旧驱动完全一样（`poisoned 0`，采到图）。这一步不过，就停下。
+2. **开串口白名单**（串口终端里手动敲，三条命令依次执行）：
+   - `rmmod sg3000_rx`
+   - `insmod /tmp/sg3000-board/sg3000_rx.ko cam_serial=1`
+   - `cat /sys/module/sg3000_rx/parameters/cam_serial`，应该输出 `Y`
+3. 运行 `/tmp/sg3000-board/sg3000-capture camera-probe`。成功会打印 `CameraManufacturer=…` 和 `CameraModel=…`。
+4. 读不出时依次换参数再试：`--baud 115200`、`--baud 460800`、`--port 1`。每次的完整输出都记下来。
+5. 恢复：重启板子即可。或者先 `rmmod`，再不带参数 `insmod`。
+
+### 8.3 之后
+
+- [ ] 16K 相机的 XML。两条路：
+  - Windows 上用 VisionKit 连一次相机，然后全盘搜当天修改过的 `SchemaVersion*` 文件；
+  - GenCP 通了以后，从相机本身读出来（GenCP 清单表，到时再写）。
+- [ ] 用 16K XML 核对 `cam_regs.h`，再启用 `cam_config`。

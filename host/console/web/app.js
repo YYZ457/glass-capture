@@ -74,6 +74,7 @@ function update(s) {
     b.disabled = !s.connected || !s.shell_ready || s.busy || (!basic && !s.identity_ok);
   });
   $('net-setup').disabled = !s.connected || !s.shell_ready || s.busy || !s.identity_ok;
+  $('card-set').disabled = $('net-setup').disabled;
   $('net-state').textContent = s.net && s.net.pc_ip ? `网口已通：板子 → 电脑 ${s.net.pc_ip}:${s.net.port}。回传和连续候选走网口。` : '网口未配置：回传走 USB 串口。先「从 SD 加载程序」，再填 IP 测试。';
   const fields = s.checks.fields || {}, p = s.checks.preflight, live = s.connected;
   $('linux-state').textContent = fields.KERNEL ? (live ? '已读内核 · ' : '断开前 · ') + fields.KERNEL : '等待检查';
@@ -142,6 +143,7 @@ try { $('net-pc').value = localStorage.getItem('sg-net-pc') || ''; $('net-board'
 $('net-setup').onclick=()=>{ const pc=$('net-pc').value.trim(), board=$('net-board').value.trim();
   try { localStorage.setItem('sg-net-pc', pc); localStorage.setItem('sg-net-board', board); } catch {}
   post('action',{action:'network',options:{pc_ip:pc,board_ip:board}}); };
+$('card-set').onclick=()=>post('action',{action:'card_set',options:{name:$('card-name').value,value:Number($('card-value').value)}});
 $('start-stream').onclick=()=>post('action',{action:'stream',options:{seconds:Number($('stream-seconds').value),processor:$('stream-processor').value}});
 $('copy-path').onclick=async()=>{try{await navigator.clipboard.writeText(sourcePath);toast('源码完整路径已复制');}catch{toast(sourcePath,true);}};
 $('export').onclick=async()=>{try{const r=await fetch('/api/log');if(!r.ok)throw new Error('导出失败');const blob=await r.blob(),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='sg3000-session-'+new Date().toISOString().replace(/[:.]/g,'-')+'.jsonl';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);}catch(e){toast(e.message,true);}};

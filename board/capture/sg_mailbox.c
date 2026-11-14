@@ -22,7 +22,7 @@
  * 每一步里的判断、顺序、返回的错误码都和 legacy 完全一致。
  *
  * 安全约束（不要放宽）：
- *   - 写只允许 SG_L_ACQ_START / SG_L_ACQ_STOP，其他返回 -EPERM
+ *   - 写只允许 sg_mbx_write_allowed() 里的地址和值，其他返回 -EPERM
  *   - 发送前回复窗口非空 → -EBUSY，不清理、不重试
  */
 #include <string.h>
@@ -62,7 +62,8 @@ static void put32(unsigned char *p, uint32_t value)
 
 /* ---- 第 1 步：发送 --------------------------------------------------- */
 
-static int mbx_send(struct sg_capture_session *s, uint32_t address, int write, uint32_t read_len)
+/* arg：读时是读取长度（寄存器 4，块读最多 0x100）；写时是写入值。 */
+static int mbx_send(struct sg_capture_session *s, uint32_t address, int write, uint32_t arg)
 {
     /* 报文共 7 个字（读）或 8 个字（写）。下标含义见 sg_mailbox.h 顶部注释。
      * 先填固定的字，其余几个字下面再填。 */
@@ -96,8 +97,10 @@ static int mbx_send(struct sg_capture_session *s, uint32_t address, int write, u
     packet[2] = (write ? 16u : 12u) | ((uint32_t)s->request_id << 16);
     packet[4] = write ? SG_MBX_OP_WRITE : SG_MBX_OP_READ;
     packet[5] = address;
-    if (!write) {
-        packet[6] = read_len;               /* 读多少字节：寄存器 4；卡存储块读最多 0x100 */
+    if (write) {
+        packet[7] = arg;                    /* 写入值（开始/停止采集是 1）*/
+    } else {
+        packet[6] = arg;                    /* 读多少字节 */
     }
 
     /* 逐字写进发送窗口，最后写一次"总字节数"，卡才会把报文发出去。 */
@@ -203,8 +206,24 @@ static int mbx_parse_reply(struct sg_capture_session *s, const unsigned char *re
 
 /* ---- 读写共用的主流程 ------------------------------------------------ */
 
+/* 写白名单：开始 / 停止采集（值 1），加上 16K 配置要用的 5 个卡参数（值域来自卡的 XML）。
+ * 其余逻辑地址一律 -EPERM —— 卡的 XML 里还有重启、重载 FPGA 之类的寄存器，绝不能误写。 */
+int sg_mbx_write_allowed(uint32_t address, uint32_t value)
+{
+    switch (address) {
+    case SG_L_ACQ_START:
+    case SG_L_ACQ_STOP:       return value == 1u;
+    case SG_L_SCAN_TYPE:      return value <= 1u;
+    case SG_L_TAP_GEOMETRY:   return value >= 1u && value <= 10u;
+    case SG_L_CL_CONFIG:      return value == 0u || value == 1u || value == 2u || value == 4u;
+    case SG_L_CAMERA_WIDTH:   return value >= 128u && value <= 65535u;
+    case SG_L_CAMERA_HEIGHT:  return value >= 200u && value <= 65535u;
+    default:                  return 0;
+    }
+}
+
 static int mbx_transact(struct sg_capture_session *s, uint32_t address, int write,
-                        uint32_t *value, uint32_t timeout_ms, int cleanup)
+                        uint32_t write_value, uint32_t *value, uint32_t timeout_ms, int cleanup)
 {
     unsigned char reply[MBX_REPLY_MAX];
     uint32_t length = 0;
@@ -214,12 +233,11 @@ static int mbx_transact(struct sg_capture_session *s, uint32_t address, int writ
     if (!cleanup && sg_session_cancelled(s)) {
         return -ECANCELED;
     }
-    /* 白名单：写只允许开始 / 停止采集。 */
-    if (write && address != SG_L_ACQ_START && address != SG_L_ACQ_STOP) {
+    if (write && !sg_mbx_write_allowed(address, write_value)) {
         return -EPERM;
     }
 
-    ret = mbx_send(s, address, write, 4);
+    ret = mbx_send(s, address, write, write ? write_value : 4u);
     if (ret) {
         return ret;
     }
@@ -242,7 +260,7 @@ int sg_mbx_read(struct sg_capture_session *s, uint32_t logical_addr, uint32_t *v
     if (s == NULL || value == NULL) {
         return -EINVAL;
     }
-    return mbx_transact(s, logical_addr, 0, value, timeout_ms, cleanup);
+    return mbx_transact(s, logical_addr, 0, 0, value, timeout_ms, cleanup);
 }
 
 int sg_mbx_write(struct sg_capture_session *s, uint32_t logical_addr,
@@ -251,7 +269,22 @@ int sg_mbx_write(struct sg_capture_session *s, uint32_t logical_addr,
     if (s == NULL) {
         return -EINVAL;
     }
-    return mbx_transact(s, logical_addr, 1, NULL, timeout_ms, cleanup);
+    if (logical_addr != SG_L_ACQ_START && logical_addr != SG_L_ACQ_STOP) {
+        return -EPERM;
+    }
+    return mbx_transact(s, logical_addr, 1, 1u, NULL, timeout_ms, cleanup);
+}
+
+int sg_mbx_write_value(struct sg_capture_session *s, uint32_t logical_addr, uint32_t value,
+                       uint32_t timeout_ms)
+{
+    if (s == NULL) {
+        return -EINVAL;
+    }
+    if (logical_addr == SG_L_ACQ_START || logical_addr == SG_L_ACQ_STOP) {
+        return -EPERM;                      /* 开始 / 停止只能走 sg_mbx_write */
+    }
+    return mbx_transact(s, logical_addr, 1, value, NULL, timeout_ms, 0);
 }
 
 /* ---- 卡存储块读（照 LusterGraber.dll SGCardCmdHelper::ReadData）---------

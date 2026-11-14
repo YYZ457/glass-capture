@@ -7,6 +7,7 @@
  *   1. 驱动信息（SG_IOC_INFO）：PCIe 位置、ABI、引擎 ID、对齐要求、poisoned
  *   2. 预检结果：DDR 状态、时钟寄存器（逐位打印）、CL 配置、彩色、位深
  *   3. SG_HDR_READY、SG_ACQ_STATE 的当前值，以及 VisionKit 枚举相机时读的 0x10540010
+ *   3b. 卡参数（宽、高、Tap、触发、实测行频、相机时钟……地址来自卡自己的 XML）
  *   4. （--card-xml）从卡存储读出卡自己的 GenICam XML，存到 DIR，见 sg_cardxml.h
  * 退出码：0 一切正常；1 预检不通过；2 打不开设备；3 读卡 XML 失败
  *
@@ -14,7 +15,7 @@
  * 没有 legacy 来源；可参考 legacy sg3000_capture.c 的 "preflight" 子命令。
  *
  * 这个程序里只有"读"：
- *   - 邮箱读（预检五项 + 0x10540010；--card-xml 时还有 URL 和 XML 所在的地址）
+ *   - 邮箱读（预检五项 + 0x10540010 + 卡参数；--card-xml 时还有 URL 和 XML 所在的地址）
  *   - 直接读两个 BAR0 寄存器（SG_HDR_READY、SG_ACQ_STATE）
  * 没有任何写，也没有启动 DMA。
  *
@@ -137,6 +138,67 @@ static void print_registers(struct sg_capture_session *s, uint32_t timeout_ms)
     } else {
         printf("camera enum     0x%08x   (VisionKit: low byte 0x31 '1' = 2 channels, else 1)\n", value);
     }
+}
+
+/* ---- 3b. 卡参数（地址来自卡自己的 XML，[厂家]）。只读。 ---------------- */
+
+struct card_param { const char *name; uint32_t addr; const char *note; };
+
+static const struct card_param CARD_PARAMS[] = {
+    { "CameraScanType",    SG_L_SCAN_TYPE,          "0 AreaScan / 1 LineScan" },
+    { "ClConfiguration",   SG_L_CL_CONFIG,          "0 Base / 1 Medium / 2 Full / 4 EightyBit" },
+    { "DeviceTapGeometry", SG_L_TAP_GEOMETRY,       "n = Geometry_1Xn_1Y" },
+    { "CameraPixelDepth",  SG_L_CAMERA_DEPTH,       "bits" },
+    { "CameraWidth",       SG_L_CAMERA_WIDTH,       "pixels per line" },
+    { "CameraHeight",      SG_L_CAMERA_HEIGHT,      "lines per block" },
+    { "XOffset",           SG_L_X_OFFSET,           "" },
+    { "YOffset",           SG_L_Y_OFFSET,           "" },
+    { "Width(out)",        SG_L_OUT_WIDTH,          "read-only" },
+    { "Height(out)",       SG_L_OUT_HEIGHT,         "read-only" },
+    { "CameraImageWidth",  SG_L_IMAGE_WIDTH,        "split image width" },
+    { "SplitEn",           SG_L_SPLIT_EN,           "" },
+    { "FrameLengthMethod", SG_L_FRAME_LENGTH_METHOD, "0 Fix / 1 Variable" },
+    { "DvalMode",          SG_L_DVAL_MODE,          "" },
+    { "FvalMode",          SG_L_FVAL_MODE,          "" },
+    { "CLChipStatus",      SG_L_CL_CHIP_STATUS,     "bit0..3" },
+    { "CLFvalLval",        SG_L_CL_FVAL_LVAL,       "bit0..2 Fval1..3, bit3..5 Lval1..3" },
+    { "LineTriggerEnable", SG_L_LINE_TRIGGER_EN,    "" },
+    { "LineTriggerSource", SG_L_LINE_TRIGGER_SRC,   "0 Internal / 1 Software / 2.. Line0.." },
+    { "FrameTriggerEnable", SG_L_FRAME_TRIGGER_EN,  "" },
+    { "FrameTriggerSource", SG_L_FRAME_TRIGGER_SRC, "" },
+    { "CL_CC1",            SG_L_CL_CC1,             "" },
+    { "LineRxCounter",     SG_L_LINE_RX_COUNTER,    "" },
+    { "FrameRxCounter",    SG_L_FRAME_RX_COUNTER,   "" },
+    { "LinePeriod10ns",    SG_L_LINE_PERIOD_10NS,   "" },
+    { "CameraClockCnt",    SG_L_CAMERA_CLOCK_CNT,   "" },
+    { "FPGADate",          SG_L_FPGA_DATE,          "" },
+    { "VersionDate",       SG_L_VERSION_DATE,       "" },
+};
+
+static void print_card_params(struct sg_capture_session *s, uint32_t timeout_ms)
+{
+    uint32_t v, period = 0, clk = 0;
+    size_t i;
+    int ret, have_period = 0, have_clk = 0;
+
+    puts("== Card params (card XML, read-only) ==");
+    for (i = 0; i < sizeof CARD_PARAMS / sizeof CARD_PARAMS[0]; ++i) {
+        const struct card_param *p = &CARD_PARAMS[i];
+        ret = sg_mbx_read(s, p->addr, &v, timeout_ms, 0);
+        if (ret) {
+            printf("CardParam %-18s 0x%08x read failed: %s (%d)\n", p->name, p->addr, strerror(-ret), ret);
+            continue;
+        }
+        printf("CardParam %-18s 0x%08x = %u (0x%x)%s%s\n", p->name, p->addr, v, v, *p->note ? "   " : "", p->note);
+        if (p->addr == SG_L_LINE_PERIOD_10NS) { period = v; have_period = 1; }
+        if (p->addr == SG_L_CAMERA_CLOCK_CNT) { clk = v; have_clk = 1; }
+    }
+    if (have_period)
+        printf("CardParam LineRateHz          %.1f   (100 MHz / (LinePeriod10ns + 1); 0 = no lines)\n",
+               period == 0 || period > 2147483646u ? 0.0 : 100000000.0 / ((double)period + 1.0));
+    if (have_clk)
+        printf("CardParam CameraClockMHz      %.2f   (819200 / (CameraClockCnt + 1), formula from card XML; 0 = out of range)\n",
+               clk < 8191u || clk > 81919u ? 0.0 : 819200.0 / ((double)clk + 1.0));
 }
 
 /* ---- 4. 卡自己的 XML（可选）------------------------------------------ */
@@ -295,6 +357,7 @@ int main(int argc, char **argv)
 
     /* 预检失败也照样读这两个寄存器，它们能帮助判断原因。 */
     print_registers(&session, options.control_timeout_ms);
+    print_card_params(&session, options.control_timeout_ms);
 
     if (card_xml_dir && dump_card_xml(&session, card_xml_dir, options.control_timeout_ms) && !exit_code)
         exit_code = EXIT_CARD_XML;

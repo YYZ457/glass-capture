@@ -187,3 +187,21 @@ def test_prepare_accepts_crlf_checksums(board):
     legacy.write_bytes(legacy.read_bytes().replace(b"\n", b"\r\n"))
     job = run(console, "prepare")
     assert job["status"] == "success", job
+
+
+def test_card_set(board):
+    """卡参数写入：值域在电脑端先挡一次；板上程序读回一致才算成功。"""
+    console, tmp = board
+    with pytest.raises(ValueError):
+        console.start("card_set", {"name": "CameraWidth", "value": 100})
+    with pytest.raises(ValueError):
+        console.start("card_set", {"name": "DeviceReboot", "value": 1})
+    fake = tmp / "board" / "sg3000-capture"
+    fake.write_text("#!/bin/bash\n[ \"$1\" = card-set ] || exit 9\n"
+                    "echo \"CardSet $2 0x10203008: 4096 -> $3, readback $3\"\n")
+    fake.chmod(0o755)
+    job = run(console, "card_set", {"name": "CameraWidth", "value": 16384})
+    assert job["status"] == "success" and "4096 → 16384" in job["message"], job
+    fake.write_text("#!/bin/bash\necho 'Refused: acquisition is not stopped (SG_ACQ_STATE 0x00000000)' >&2\nexit 1\n")
+    job = run(console, "card_set", {"name": "CameraWidth", "value": 16384})
+    assert job["status"] == "error" and "not stopped" in job["message"]

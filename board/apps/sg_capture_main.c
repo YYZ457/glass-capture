@@ -38,6 +38,8 @@
 #include "pgm_write.h"
 #include "tx_tcp.h"
 #include "cam_serial.h"
+#include "sg_mailbox.h"
+#include "sg3000_regs.h"
 #include "sg_err.h"
 
 #define VERSION_TEXT     "sg3000-capture 1.0 ABI 1"
@@ -58,6 +60,8 @@ static void usage(void)
          "       sg3000-capture capture --output PATH [--device PATH] [--timeout-ms 1..60000] [--send IP[:PORT]]\n"
          "       sg3000-capture send FILE.pgm --to IP[:PORT]\n"
          "       sg3000-capture camera-probe [--device PATH] [--port 0|1] [--baud N]\n"
+         "       sg3000-capture card-set NAME VALUE [--device PATH]\n"
+         "         NAME: CameraWidth CameraHeight DeviceTapGeometry ClConfiguration CameraScanType\n"
          "       sg3000-capture version\n"
          "Default device: /dev/sg3000_rx_0000:01:00.0\n"
          "Capture explicitly enables the experimental port-0 acquisition sequence.");
@@ -184,6 +188,82 @@ out:
     return ret ? 1 : 0;
 }
 
+/* sg3000-capture card-set NAME VALUE：写一个卡参数（地址和值域来自卡的 XML）。
+ * 只在采集已停止（SG_ACQ_STATE = "STOP"）时写；写前读一次、写后读回核对。 */
+static const struct { const char *name; uint32_t addr; } CARD_SET[] = {
+    { "CameraWidth", SG_L_CAMERA_WIDTH }, { "CameraHeight", SG_L_CAMERA_HEIGHT },
+    { "DeviceTapGeometry", SG_L_TAP_GEOMETRY }, { "ClConfiguration", SG_L_CL_CONFIG },
+    { "CameraScanType", SG_L_SCAN_TYPE },
+};
+
+static int card_set_main(int argc, char **argv)
+{
+    const char *device = SG_DEFAULT_DEVICE;
+    struct sg_capture_session session;
+    struct sg_capture_options options;
+    struct sg_capture_io io;
+    struct sg_linux_dev dev;
+    uint32_t addr = 0, value, old, back, state, other;
+    unsigned long parsed;
+    char *end;
+    size_t k;
+    int i, ret;
+
+    if (argc < 4) { usage(); return 2; }
+    for (k = 0; k < sizeof CARD_SET / sizeof CARD_SET[0]; ++k)
+        if (!strcmp(argv[2], CARD_SET[k].name)) addr = CARD_SET[k].addr;
+    errno = 0;
+    parsed = strtoul(argv[3], &end, 0);
+    if (!addr || errno || *end || parsed > 0xffffffffUL) { usage(); return 2; }
+    value = (uint32_t)parsed;
+    for (i = 4; i < argc; ++i) {
+        if (!strcmp(argv[i], "--device") && i + 1 < argc) device = argv[++i];
+        else { usage(); return 2; }
+    }
+    if (!sg_mbx_write_allowed(addr, value)) {
+        fprintf(stderr, "Refused: %s = %u is outside the range allowed by the card XML\n", argv[2], value);
+        return 2;
+    }
+
+    sg_capture_default_options(&options);
+    ret = sg_linux_open(&dev, device, &interrupted);
+    if (ret) goto out;
+    sg_linux_io(&dev, &io);
+    if ((ret = sg_capture_session_init(&session, &io)) ||
+        (ret = sg_session_rd(&session, SG_ACQ_STATE, &state)))
+        goto close;
+    if (state != SG_ACQ_STATE_STOP) {
+        fprintf(stderr, "Refused: acquisition is not stopped (SG_ACQ_STATE 0x%08x)\n", state);
+        ret = -EBUSY;
+        goto close;
+    }
+    /* 宽 × 高不能超过单块上限（Mono8 一字节一像素）*/
+    if (addr == SG_L_CAMERA_WIDTH || addr == SG_L_CAMERA_HEIGHT) {
+        ret = sg_mbx_read(&session, addr == SG_L_CAMERA_WIDTH ? SG_L_CAMERA_HEIGHT : SG_L_CAMERA_WIDTH,
+                          &other, options.control_timeout_ms, 0);
+        if (ret) goto close;
+        if ((uint64_t)value * other > SG_CAPTURE_MAX_BYTES) {
+            fprintf(stderr, "Refused: %u x %u exceeds the %u-byte block limit\n", value, other, SG_CAPTURE_MAX_BYTES);
+            ret = -EFBIG;
+            goto close;
+        }
+    }
+    if ((ret = sg_mbx_read(&session, addr, &old, options.control_timeout_ms, 0)) ||
+        (ret = sg_mbx_write_value(&session, addr, value, options.control_timeout_ms)) ||
+        (ret = sg_mbx_read(&session, addr, &back, options.control_timeout_ms, 0)))
+        goto close;
+    printf("CardSet %s 0x%08x: %u -> %u, readback %u\n", argv[2], addr, old, value, back);
+    if (back != value) {
+        fprintf(stderr, "Card did not keep the value\n");
+        ret = -EIO;
+    }
+close:
+    sg_linux_close(&dev);
+out:
+    if (ret) fprintf(stderr, "Failed: %s (%d)\n", strerror(-ret), ret);
+    return ret ? 1 : 0;
+}
+
 int main(int argc, char **argv)
 {
     const char *device = SG_DEFAULT_DEVICE;
@@ -215,6 +295,9 @@ int main(int argc, char **argv)
     }
     if (!strcmp(argv[1], "camera-probe")) {
         return camera_main(argc, argv);
+    }
+    if (!strcmp(argv[1], "card-set")) {
+        return card_set_main(argc, argv);
     }
     capture = !strcmp(argv[1], "capture");
     if (!capture && strcmp(argv[1], "preflight")) {

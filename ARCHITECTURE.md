@@ -56,7 +56,7 @@ apps ─▶ stream ─▶ processing
 | 文件 | 职责 | 状态 |
 |---|---|---|
 | `sg_session` | 会话、超时参数、读写小工具、帧释放 | ✅ 实机单帧与读 XML 验证通过 |
-| `sg_mailbox` | 邮箱报文收发 | ✅ 实机验证通过（严格寄存器读 + 存储块读 `sg_mbx_read_block`） |
+| `sg_mailbox` | 邮箱报文收发 | ✅ 实机验证通过（严格寄存器读 + 存储块读 `sg_mbx_read_block`）；🟡 卡参数写 `sg_mbx_write_value`（5 个参数白名单）未上板 |
 | `sg_preflight` | 只读体检 | ✅ 实机验证通过 |
 | `sg_block` | 块头读取、校验（纯函数）、分块 DMA | ✅ 实机单帧采集验证通过 |
 | `sg_acq` | 开始 / 取块 / 停止状态机，单帧便捷函数 | ✅ 实机单帧采集验证通过 |
@@ -100,7 +100,7 @@ apps ─▶ stream ─▶ processing
 | 文件 | 程序 | 状态 |
 |---|---|---|
 | `sg_status.c` | `sg_status` 只读体检；`--card-xml DIR` 读卡 XML | ✅ 实机体检与 `--card-xml` 读出均通过 |
-| `sg_capture_main.c` | `sg3000-capture` 单帧；`send` 经网口发图；`camera-probe` 经串口读相机型号；`version` | ✅ `preflight` / `capture`（4096×2000）/ `version` 实机通过；`send` 和 `camera-probe` 待测 |
+| `sg_capture_main.c` | `sg3000-capture` 单帧；`send` 经网口发图；`card-set` 写卡参数（白名单 + 读回）；`camera-probe` 经串口读相机型号；`version` | ✅ `preflight` / `capture`（4096×2000）/ `version` 实机通过；`send` 和 `camera-probe` 待测 |
 | `sg_stream_main.c` | `sg3000-stream` 连续；`--processor candidates`、`--tcp` | 🟡 已迁移，合成源跑通；硬件源没上板 |
 | `pgm_write` | 原子写 PGM | 🟡 已写，电脑上测试通过 |
 

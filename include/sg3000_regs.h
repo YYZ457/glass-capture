@@ -3,7 +3,7 @@
  * sg3000_regs.h —— SG3000 采集卡的所有地址和魔数，**只在这里定义一次**。
  *
  * 可信度标记（每一条都必须有）：
- *   [厂家]  来自厂家文档                      —— 目前没有任何一条
+ *   [厂家]  来自厂家资料：采集卡自己存的 GenICam XML（docs/vendor/card_xml/，2026-11-14 实板读出）
  *   [观察]  来自观察 Windows 驱动 / VisionKit 的行为，并在 ZCU102 上实测通过
  *   [推测]  能用，但含义是推断出来的
  *   [推测+] 推测，且有旁证（如与厂家示例里的参数名对得上）
@@ -106,15 +106,42 @@
 
 /* ===== C. 逻辑地址（只能经邮箱访问）================================= */
 #define SG_L_CAMERA_ENUM         0x10540010u  /* [逆向] 低字节 '1'(0x31) 时 VisionKit 认为卡有 2 路，否则 1 路。只读 */
-#define SG_L_DDR_STATUS          0x10540024u  /* [推测] 0 未初始化 / 2 已校准；实测 2 */
-#define SG_L_PIXEL_CLOCKS        0x10002020u  /* [推测] bit0 = Camera Link 时钟 1 有信号；实测 0x59，其余位未知 */
-/* 下面三条与 VisionKit 示例里的卡参数 ClConfiguration / CameraColorType / CameraPixelDepth
- * 顺序和含义一致（docs/interfaces/I2 第 5 节），可信度略升，仍待卡的 XML 确认 */
-#define SG_L_CL_CONFIG           0x10601004u  /* [推测+] ClConfiguration，0 = Base；实测 0 */
-#define SG_L_CAMERA_COLOR        0x10601008u  /* [推测+] CameraColorType，0 = 黑白；实测 0 */
-#define SG_L_CAMERA_DEPTH        0x1060100cu  /* [推测+] CameraPixelDepth；实测 8 */
-#define SG_L_ACQ_START           0x10601014u  /* [观察] 写 = 开始采集 */
-#define SG_L_ACQ_STOP            0x10601018u  /* [观察] 写 = 停止采集 */
+#define SG_L_DDR_STATUS          0x10540024u  /* [厂家] DDRInitialStatus；0 未初始化 / 2 已校准；实测 2 */
+#define SG_L_PIXEL_CLOCKS        0x10002020u  /* [厂家] bit0..2 = CameraLinkPixelClock1..3；实测 0x59 / 0x19，bit3+ XML 未定义 */
+#define SG_L_CL_CONFIG           0x10601004u  /* [厂家] ClConfiguration：Base 0 / Medium 1 / Full 2 / EightyBit 4；实测 0 */
+#define SG_L_CAMERA_COLOR        0x10601008u  /* [厂家] CameraColorType：Mono 0；实测 0 */
+#define SG_L_CAMERA_DEPTH        0x1060100cu  /* [厂家] CameraPixelDepth：8/10/12/14/16；实测 8 */
+#define SG_L_ACQ_START           0x10601014u  /* [厂家] AcquisitionStart，写 1 */
+#define SG_L_ACQ_STOP            0x10601018u  /* [厂家] AcquisitionStop，写 1 */
+
+/* 卡参数（[厂家]，全部 RW、小端 32 位；XML 里都受 TLParamsLocked 约束 → 只在停止采集时写）*/
+#define SG_L_SCAN_TYPE           0x10601000u  /* CameraScanType：AreaScan 0 / LineScan 1 */
+#define SG_L_TAP_GEOMETRY        0x10601010u  /* DeviceTapGeometry：Geometry_1X<n>_1Y = n（1..10）*/
+#define SG_L_CAMERA_WIDTH        0x10203008u  /* CameraWidth：128..65535，8 位时步进 1 */
+#define SG_L_CAMERA_HEIGHT       0x1020300cu  /* CameraHeight：每块行数，≥ 200 */
+#define SG_L_X_OFFSET            0x10203014u  /* XOffset */
+#define SG_L_Y_OFFSET            0x10203018u  /* YOffset */
+#define SG_L_IMAGE_WIDTH         0x1020208cu  /* CameraImageWidth（分割图宽度）*/
+#define SG_L_SPLIT_EN            0x10202070u  /* SplitEn：off 0 / on 1 */
+#define SG_L_FRAME_LENGTH_METHOD 0x1020003cu  /* FrameLengthMethod：FixLength 0 / VariableLength 1 */
+#define SG_L_OUT_WIDTH           0x10202040u  /* Width（RO）输出图宽 */
+#define SG_L_OUT_HEIGHT          0x10202044u  /* Height（RO）输出图高 */
+#define SG_L_DVAL_MODE           0x10002018u  /* DvalMode */
+#define SG_L_FVAL_MODE           0x1000201cu  /* FvalMode */
+#define SG_L_CL_CHIP_STATUS      0x10002038u  /* bit0..3 = CameraLinkChip/Chip1..3Status（RO）*/
+#define SG_L_CL_FVAL_LVAL        0x10002028u  /* bit0..2 = Fval1..3，bit3..5 = Lval1..3（RO）*/
+#define SG_L_LINE_TRIGGER_EN     0x10102040u  /* LineTriggerEnable / LineTriggerMode：0 / 1 */
+#define SG_L_LINE_TRIGGER_SRC    0x10102044u  /* LineTriggerSource：Internal 0 / Software 1 / Line0.. 2.. */
+#define SG_L_FRAME_TRIGGER_EN    0x10103040u  /* FrameTriggerEnable */
+#define SG_L_FRAME_TRIGGER_SRC   0x10103044u  /* FrameTriggerSource */
+#define SG_L_CL_CC1              0x1000402cu  /* CL_CC1：OFF 0 / ... */
+#define SG_L_LINE_RX_COUNTER     0x10201034u  /* LineReceiveCounter（RO）*/
+#define SG_L_FRAME_RX_COUNTER    0x1020102cu  /* FrameReceiveCounter（RO）*/
+#define SG_L_LINE_PERIOD_10NS    0x105400b8u  /* （RO）行频 = 100 MHz / (值 + 1) */
+#define SG_L_CAMERA_CLOCK_CNT    0x10540050u  /* （RO）相机时钟 = 819200 / (值 + 1) MHz（卡 XML 公式），8191..81919 之外无效 */
+#define SG_L_FPGA_DATE           0x1054000cu  /* FPGADate（RO）*/
+#define SG_L_VERSION_DATE        0x10540020u  /* VersionDate（RO）*/
+/* 绝对不要写：0x10540018 DeviceReboot、0x10540040 ManualFPGAReload、0x10540044/4c FPGA 重载（XML 里有）*/
 /* 待找：卡参数 CameraWidth / CameraHeight / DeviceTapGeometry 的地址。
  * 已确认 Windows 软件每次都设置 CameraWidth，Linux 从未设置 → 卡报告 4096 的直接原因。
  * [逆向] 地址都在卡自己的 XML 里，Linux 可以读出来：board/capture/sg_cardxml.h（URL 在逻辑地址 0x190）。

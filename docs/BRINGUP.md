@@ -71,6 +71,31 @@ python host/console/launch.py
 - 面板上"检测结论"显示每块候选个数
 - 这是第一版算法，参数没对过真值，**候选不是缺陷判定**
 
+## 5½. 16K 宽度实验（卡参数，旧驱动即可）
+
+前提：第 4 节 1–8 步都通过，**网口已配置**（16K 一块约 32 MB，走串口要半小时以上）。
+
+1. **先读，不写。** 点「02½ 只读体检」，把 `== Card params ==` 一整段记下来，尤其是这几项：
+   - `CameraWidth`、`CameraHeight`、`DeviceTapGeometry`、`ClConfiguration`、`CameraScanType`
+   - `LineRateHz`：相机实际行频；0 表示卡没收到行
+   - `CameraClockMHz`：Camera Link 像素时钟
+   - `CLFvalLval`
+2. **对照组**：保持现在的宽度（多半是 4096），用黑纸遮住视野左半边，采一张并回传。
+3. **改宽度**：在「采集卡参数」里选 `CameraWidth`，填 `16384`，点「写入采集卡」。
+   - 成功会显示"4096 → 16384（已读回确认）"。
+   - 板上命令行等价：`/tmp/sg3000-board/sg3000-capture card-set CameraWidth 16384`
+4. **再采一帧**（遮挡保持不变）：应该看到 `Saved complete Mono8 frame: 16384 x 2000, 32768000 bytes`，然后回传。
+5. **判断**：
+   - 16K 图里左半边是黑的、右半边正常 → 相机本来就在输出 16384 宽，问题解决。
+   - 图里出现 4 段重复，或有错位、斜纹 → 相机实际宽度或 Tap 和卡不一致。记下现象，**不要自己改 Tap**，发回来分析。
+   - 04 超时（-110）或报错 → 改回 4096（`card-set CameraWidth 4096`，或者直接断电，卡参数断电即恢复默认），发日志回来。
+6. **断电重启后**再做一次「02½」，看 `CameraWidth` 是不是回到了默认值。这能确认卡参数会不会保存。
+
+规矩：
+- 只改 `CameraWidth`，其他参数先不动。
+- 只能在采集停止时写（程序会自己检查）。
+- `ClConfiguration` 不要改：相机现在是 Base。
+
 ## 6. 采到图之后可以马上做的验证（电脑上，不用板子）
 
 ```
@@ -110,4 +135,5 @@ python -I host/detect/candidates.py D:\SG3000_Captures\某张图.pgm --threshold
 3. 采到的第一张图（PGM），以及遮住左半边的那张（V2 用）
 4. 盖镜头盖采的 2~3 张图（V3 用）
 5. 如果有：Windows 上 VisionKit 导出的**这台 16K 相机**的 GenICam XML（`cam_regs.h` 现在用的是 8K 型号的地址）
+5½. 16K 宽度实验：改宽度前后两次 `== Card params ==` 全段，以及两张遮半边的图
 6. **「02¾ 读取采集卡 XML」读到的文件**（`D:\SG3000_Captures\card-xml\` 里；`CameraWidth` 的地址在里面，见 I2 第 5 节）

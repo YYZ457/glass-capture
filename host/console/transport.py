@@ -281,7 +281,7 @@ class Console:
         return output
 
     def start(self, action, options=None):
-        if action not in {'probe', 'prepare', 'preflight', 'capture', 'fetch_last', 'dmesg', 'release', 'prepare_stream', 'stream', 'replay', 'status', 'network', 'card_xml'}:
+        if action not in {'probe', 'prepare', 'preflight', 'capture', 'fetch_last', 'dmesg', 'release', 'prepare_stream', 'stream', 'replay', 'status', 'network', 'card_xml', 'card_set'}:
             raise ValueError('未知操作。')
         with self.lock:
             if action != 'replay' and (not self.connected or not self.shell_ready):
@@ -299,6 +299,8 @@ class Console:
             self.stream_options = dict(seconds=seconds, processor=processor)
             if action == 'network':
                 self.net_options = self._check_net_options(options)
+            if action == 'card_set':
+                self.card_set_options = self._check_card_set(options)
             if action in {'stream', 'replay'}:
                 self.stream = {'channel': 'recorded-replay' if action == 'replay' else 'board', 'status': 'starting'}
                 self.stream_lines = ''
@@ -577,7 +579,7 @@ class Console:
         version = self.run_checked(STREAM_APP + ' --version')
         if STREAM_VERSION not in version: raise RuntimeError('先执行「从 SD 加载程序」。')
         command = (STREAM_APP + ' --source hardware --processor ' + processor + ' --seconds ' + str(seconds)
-                   + ' --queue 4 --max-frame-mib 16 --emit-ms 1000')
+                   + ' --queue 4 --max-frame-mib 48 --emit-ms 1000')   # 16384 × 2000 一块约 31 MiB
         if processor == 'candidates':
             if self.net:
                 self._ensure_receiver()
@@ -593,6 +595,28 @@ class Console:
         return '连续接收已结束，收到 ' + str(ended.get('received', '?')) + ' 块，处理 ' + str(ended.get('processed', '?')) + ' 块。处理方式：' + what + '。'
 
     # ==== 网口 ==========================================================
+
+    # 和 board/capture/sg_mailbox.c 的 sg_mbx_write_allowed 一致（值域来自卡的 XML）
+    CARD_SET_RANGES = {'CameraWidth': range(128, 65536), 'CameraHeight': range(200, 65536),
+                       'DeviceTapGeometry': range(1, 11), 'ClConfiguration': (0, 1, 2, 4),
+                       'CameraScanType': (0, 1)}
+
+    @classmethod
+    def _check_card_set(cls, options):
+        name, value = options.get('name'), options.get('value')
+        if name not in cls.CARD_SET_RANGES or type(value) is not int or value not in cls.CARD_SET_RANGES[name]:
+            raise ValueError('卡参数名或数值不在卡 XML 允许的范围内。')
+        return dict(name=name, value=value)
+
+    def _card_set(self):
+        """写一个卡参数（只在采集停止时；写后读回核对）。不启动采集。"""
+        o = self.card_set_options
+        rc, output = self.exchange(f"{APP} card-set {o['name']} {o['value']} 2>&1", 15)
+        done = re.search(r'CardSet (\w+) 0x[0-9a-f]+: (\d+) -> (\d+), readback (\d+)', output)
+        if rc or not done:
+            raise RuntimeError('卡参数没写成：' + output[-400:])
+        old, _, back = (int(x) for x in done.groups()[1:])
+        return f"采集卡 {o['name']}：{old} → {back}（已读回确认）。重新「04 采集一帧」看效果；断电后恢复默认。"
 
     @staticmethod
     def _check_net_options(options):

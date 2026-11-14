@@ -7,5 +7,6 @@
 
 .net-form{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:end;padding:16px 23px;border-bottom:1px solid #edf0e8}
 .net-form label{display:flex;flex-direction:column;font-size:11px;color:var(--muted);gap:6px;flex:1 1 140px}
+.net-form select{padding:9px;border:1px solid var(--line);border-radius:5px;background:#f8f9f6;color:var(--ink);font-size:12px}
 .net-form input{padding:9px;border:1px solid var(--line);border-radius:5px;background:#f8f9f6;color:var(--ink);min-width:0;font-size:12px}.net-form button{font-size:12px}
 .net-form small{flex-basis:100%;font-size:11px;color:var(--muted)}

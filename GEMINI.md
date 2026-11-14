@@ -19,6 +19,7 @@
 - **板上程序的输出文字不要改**：`host/console/transport.py` 和 `telemetry.py` 用正则解析它们（`DDRInitialStatus=`、`Saved complete Mono8 frame:`、`SGJSON {...}` 等）。
 - **串口命令必须是纯 ASCII**（`transport.py` 里发给板子的 shell 命令不能有中文）。
 - **`legacy/` 只读**，是迁移参照。
+- **卡参数写白名单**在 `sg_mbx_write_allowed()`（`sg_mailbox.c`）和中控台 `CARD_SET_RANGES`，两处必须一致。加新可写参数前先在 `docs/vendor/card_xml/` 的 XML 里查值域，并且只加需要的那一个。XML 里的 `DeviceReboot`、`ManualFPGAReload` 这类寄存器永远不能加。
 - **卡邮箱有两种读**：寄存器用 `sg_mbx_read`（严格检查，实测可靠）；卡存储（URL / XML）用 `sg_mbx_read_block`（照 VisionKit 只查两项）。不要把严格检查放宽到寄存器读上。
 - **驱动白名单改了要跑 `make -C board test`**（含 `driver_whitelist_test`）。
 - **检测算法 C 和 Python 两份必须一致**：`board/processing/sg_candidates.c` ↔ `host/detect/candidates.py`。改一边就改另一边。

@@ -26,7 +26,8 @@
 struct card {
     uint32_t tx[8]; unsigned ntx;
     uint32_t rx[80]; unsigned nrx, rxpos, rx_len_bytes;
-    int storage_status;                        /* 读卡存储（地址 < 0x10000000）时回复偏移 16 填非 0 */
+    int storage_status;
+    uint32_t param_addr[8], param_val[8]; unsigned nparam;   /* 写过的卡参数 */                        /* 读卡存储（地址 < 0x10000000）时回复偏移 16 填非 0 */
     unsigned ack;
     int started, stopped, hdr_ready, packets_sent, ack_skip, bad_magic, preload_rx;
     uint32_t block_id;
@@ -80,13 +81,23 @@ static void card_process_mailbox(void)
     C.ack += 1 + C.ack_skip; C.ack_skip = 0;
     if (write) {
         if (addr == SG_L_ACQ_START) C.started = 1, C.hdr_ready = 1;
-        if (addr == SG_L_ACQ_STOP) C.stopped = 1;
+        else if (addr == SG_L_ACQ_STOP) C.stopped = 1;
+        else {
+            for (i = 0; i < C.nparam && C.param_addr[i] != addr; ++i) {}
+            if (i == C.nparam && C.nparam < 8) C.nparam++;
+            C.param_addr[i] = addr; C.param_val[i] = C.tx[7];
+        }
     } else switch (addr) {
         case SG_L_DDR_STATUS: val = 2; break;
         case SG_L_PIXEL_CLOCKS: val = 0x59; break;
         case SG_L_CL_CONFIG: val = 0; break;
         case SG_L_CAMERA_COLOR: val = 0; break;
         case SG_L_CAMERA_DEPTH: val = 8; break;
+        case SG_L_CAMERA_WIDTH: val = 4096; goto param;
+        case SG_L_CAMERA_HEIGHT: val = 2000; goto param;
+        param:
+            for (i = 0; i < C.nparam; ++i) if (C.param_addr[i] == addr) val = C.param_val[i];
+            break;
         default: val = storage_word(addr); break;
     }
     memset(C.rx, 0, sizeof(C.rx));
@@ -214,6 +225,21 @@ int main(void)
         CHECK(sg_mbx_read(&s, SG_L_DDR_STATUS, &v, 1000, 0) == 0 && v == 2);   /* ACK 仍连续 */
         CHECK(sg_mbx_read_block(&s, 0x190, xml, 6, 1000) == -EINVAL);
     }
+
+    /* 3c. 写卡参数：白名单、值域、写入格式（第 7 字 = 值）、读回 */
+    reset(); sg_capture_session_init(&s, &IO);
+    CHECK(sg_mbx_read(&s, SG_L_CAMERA_WIDTH, &v, 1000, 0) == 0 && v == 4096);
+    CHECK(sg_mbx_write_value(&s, SG_L_CAMERA_WIDTH, 16384, 1000) == 0);
+    CHECK(C.tx[4] == SG_MBX_OP_WRITE && C.tx[5] == SG_L_CAMERA_WIDTH && C.tx[6] == 4 && C.tx[7] == 16384);
+    CHECK(sg_mbx_read(&s, SG_L_CAMERA_WIDTH, &v, 1000, 0) == 0 && v == 16384);
+    CHECK(sg_mbx_write_value(&s, SG_L_CAMERA_WIDTH, 100, 1000) == -EPERM);          /* < 128 */
+    CHECK(sg_mbx_write_value(&s, SG_L_CL_CONFIG, 3, 1000) == -EPERM);               /* 不是 0/1/2/4 */
+    CHECK(sg_mbx_write_value(&s, 0x10540018u, 1, 1000) == -EPERM);                 /* DeviceReboot */
+    CHECK(sg_mbx_write_value(&s, SG_L_ACQ_START, 1, 1000) == -EPERM);               /* 只能走 sg_mbx_write */
+    CHECK(sg_mbx_write(&s, SG_L_CAMERA_WIDTH, 1000, 0) == -EPERM);
+    CHECK(sg_mbx_write_allowed(SG_L_TAP_GEOMETRY, 3) && !sg_mbx_write_allowed(SG_L_TAP_GEOMETRY, 11));
+    CHECK(sg_mbx_write_allowed(SG_L_ACQ_STOP, 1) && !sg_mbx_write_allowed(SG_L_ACQ_STOP, 2));
+    CHECK(C.started == 0 && C.regs_written_bad == 0);
 
     /* 4. 块头检查（纯函数） */
     struct sg_block_header h = { .width = W, .lines = MAXL, .pixfmt = SG_PIXFMT_MONO8, .seq = 1,

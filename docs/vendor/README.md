@@ -26,7 +26,7 @@
 `ClConfiguration`（`0x10601004`）、`CameraColorType`（`0x10601008`）、`CameraPixelDepth`（`0x1060100C`）、`CameraScanType`（`0x10601000`）、`DeviceTapGeometry`（`0x10601010`）、
 **`CameraWidth`**（`0x10203008`）、**`CameraHeight`**（`0x1020300C`）、`CL_CC1`、`LineTriggerEnable`、`FrameTriggerEnable`、
 `LineTriggerSource`、`FrameTriggerSource`、`LineInternalTriggerRate`，并调用 `SupportVariableFrame(1)`。
-我们的 Linux 代码之前一个都没设过 → 卡报告 4096 宽的直接原因。**采集卡端寄存器地址现已全部从 `card_xml/` 确认**；待新 `.ko` 驱动与写白名单/流程就绪后即可下发配置。
+我们的 Linux 代码之前一个都没设过 → 卡报告 4096 宽的直接原因。**采集卡端寄存器地址现已全部从 `card_xml/` 确认**。写卡参数走卡邮箱，**旧驱动即可**：`sg3000-capture card-set`（白名单见 `sg_mailbox.c`）。需要新 `.ko` 的只有相机串口。
 
 **相机**：在 SDK 里是一个独立的 "GenCP" 设备（`DeviceTypeGencp = 0x1`），经 Camera Link 串口通信。
 SDK 会从相机本身"下载 XML"（`VkSetMaxBaudrateDownXmlSupport`），说明 16K 相机的 XML 存在相机里。

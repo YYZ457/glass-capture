@@ -4,7 +4,7 @@
 
 可信度：**[厂家]** 厂家文档 ｜ **[观察]** 观察 Windows 行为得来且实机通过 ｜ **[逆向]** 反汇编 Windows 驱动 / DLL 得来，未在 Linux 实测（出处 `docs/vendor/reverse_engineering_2026-11-14.md`）｜ **[推测]** 含义是推断的 ｜ **[未知]** 只知道要用
 
-目前**没有任何一条是 [厂家]**。拿到厂家资料后逐条核对，核对过的升级为 [厂家]。
+**[厂家]** = 采集卡自己存的 GenICam XML（`docs/vendor/card_xml/`，2026-11-14 实板读出）。逻辑地址已全部用它核对。
 
 ## 1. 地址空间
 
@@ -59,44 +59,48 @@ BAR0 上有三套同构邮箱 [逆向]：
 VisionKit 对这种回复**只查**偏移 18 = 0x8001、偏移 24 = 长度（LusterGraber.dll 0x18000cf9a；Windows 驱动去掉了 16 字节头）。
 2026-11-14 实板：用上面的严格检查读 0x190 → `-EPROTO`，同一会话里寄存器读都正常。所以卡存储改用 Windows 的检查。
 
-## 4. 逻辑地址
+## 4. 逻辑地址（[厂家]：卡的 XML）
 
-| 地址 | 含义 | 可信度 | 实测值 |
+全部 4 字节、小端。下表是本仓库用到的；完整清单在 XML 里（243 个寄存器），常量在 `include/sg3000_regs.h`。
+
+| 地址 | XML 名字 | 读写 | 实测 / 说明 |
 |---|---|---|---|
-| 0x10540010 | 低字节 `'1'`（0x31）时 VisionKit 认为卡有 2 路，否则 1 路 | 逆向 | 0x30424630（ASCII "0FB0"，低字节 '0' → 1 路）|
-| 0x10540024 | DDR 初始化状态（0 未初始化 / 2 已校准）| 推测 | 2 |
-| 0x10002020 | 像素时钟，bit0 = Clock1 | 推测 | 0x59；2026-11-14 实板 0x19 时也预检通过、采图成功（bit6 不是必要条件）|
-| 0x10601004 | Camera Link 配置（0 = Base）| 推测 | 0 |
-| 0x10601008 | 彩色（0 = 黑白）| 推测 | 0 |
-| 0x1060100c | 位深 | 推测 | 8 |
-| 0x10601014 | 开始采集（写）| 观察 | — |
-| 0x10601018 | 停止采集（写）| 观察 | — |
-| ？ | 帧宽 / 每块行数 / tap 数 | **待找** | 卡报告 4096 × 2000 |
+| 0x10540024 | DDRInitialStatus | RO | 2 |
+| 0x10002020 | CameraLinkPixelClock1..3（bit0..2）| RO | 0x59 / 0x19，都能采图；bit3+ XML 未定义 |
+| 0x10601000 | CameraScanType | RW | AreaScan 0 / LineScan 1 |
+| 0x10601004 | ClConfiguration | RW | Base 0 / Medium 1 / Full 2 / EightyBit 4；实测 0 |
+| 0x10601008 | CameraColorType | RW | Mono 0；实测 0 |
+| 0x1060100c | CameraPixelDepth | RW | 8；实测 8 |
+| 0x10601010 | DeviceTapGeometry | RW | n = Geometry_1Xn_1Y（1..10）|
+| 0x10601014 / 18 | AcquisitionStart / Stop | 写 1 | 实测可用 |
+| 0x10203008 | **CameraWidth** | RW | 128..65535（8 位步进 1）|
+| 0x1020300c | **CameraHeight** | RW | 每块行数，≥ 200 |
+| 0x10202040 / 44 | Width / Height（输出）| RO | |
+| 0x105400b8 | （行周期）| RO | 行频 = 100 MHz /（值 + 1）|
+| 0x10540050 | （相机时钟计数）| RO | 相机时钟 = 819200 /（值 + 1）MHz |
+| 0x10540010 | （不在 XML 里）| RO | VisionKit 枚举用；实测 0x30424630 → 1 路 |
 
-## 5. 卡的 GenICam 参数名（2026-11-07，来自 VisionKit 示例源码）
+宽、高、Tap、CL 配置、扫描类型在 XML 里都受 `TLParamsLocked` 约束：**只在停止采集时写**。
+XML 里还有 `DeviceReboot`（0x10540018）、`ManualFPGAReload`（0x10540040）等寄存器，**绝不能写**。
 
-Windows 软件连接后会设置的卡参数见 `docs/vendor/README.md`。其中三个和我们预检读的逻辑地址**顺序、含义都对得上**：
+**写卡参数**（[逆向] 格式，LusterGraber.dll 0x18000d235）：
+- 请求第 4..7 字依次是 `0x80020000`、地址、`4`、值，和开始/停止采集是同一种报文（开始/停止时值 = 1）。
+- 命令：`sg3000-capture card-set NAME VALUE`，中控台也可以写。
+- 白名单在 `sg_mailbox.c` 的 `sg_mbx_write_allowed()`：开始/停止，加上上表 5 个可写参数，值域照 XML。
 
-| 示例源码里的参数 | 我们读的逻辑地址 | 实测 | 推测 |
-|---|---|---|---|
-| `ClConfiguration` | 0x10601004 | 0 | 同一个参数 |
-| `CameraColorType` | 0x10601008 | 0 | 同一个参数 |
-| `CameraPixelDepth` | 0x1060100c | 8 | 同一个参数 |
-| `CameraScanType`、`DeviceTapGeometry`、**`CameraWidth`**、**`CameraHeight`** | 未知 | — | 可能在 0x106010xx 附近，**不要去试写** |
+## 5. 卡的 XML 怎么来的
 
-**[逆向] 卡的 XML 在卡存储里，Linux 能直接读出来**：
-- VisionKit 的 DLL 里没有这些地址常量，全部在运行时从卡的 XML 读入。
-- XML 的位置写在卡逻辑地址 **0x190** 处的 URL 字符串里（0x100 字节，第 2 路在 0x290），格式是 `Local:<文件名>;<十六进制地址>;<十六进制长度>`。
-- 读取用的是和预检同一种邮箱读。
+- 卡逻辑地址 **0x190** 处是 URL 字符串（0x100 字节），格式 `Local:<文件名>;<十六进制地址>;<十六进制长度>`。[逆向]
+- 读的方式是卡存储块读，每包固定 0x100 字节（实板对更短的请求也回 0x100）。
+- 2026-11-14 实板读出 `SG3000V100R001C00XB046.zip`（38,217 字节），解压后是 482,952 字节的 XML，存在 `docs/vendor/card_xml/`。
+- 当年按 VisionKit 示例参数名推测的三个地址（0x10601004/08/0c）全部正确。
 
-已实现：`sg_status --card-xml DIR`，也可以点中控台「02¾ 读取采集卡 XML」。**拿到它，上表就能全部确认。**
+工具：`sg_status --card-xml DIR`，或中控台「02¾ 读取采集卡 XML」。
 
 ## 6. 待办
 
-- [ ] 拿到卡的 XML，找到 `CameraWidth` / `CameraHeight` / `DeviceTapGeometry` 的地址
-- [x] 逆向：`ReadXmlFile` 从哪个逻辑地址读 URL 字符串 → 0x190
-- [ ] 上板运行「02¾ 读取采集卡 XML」，把读出的文件发给 Claude
-- [ ] Windows：`VkConfigSave(sg3000, ...)` 存一份卡的当前参数
-- [ ] 卡的 XML 核对第 4 节所有推测地址
-- [ ] 弄清 0x10002020 时钟寄存器：日志显示早期 0x19 且位深 0（失败），后来 0x59 且位深 8（成功），bit6 可能和相机就绪有关
-- [ ] 写宽度之前，邮箱写白名单（只允许 START/STOP）和驱动白名单都要按 XML 加**一个**确定地址，不整体放开
+- [x] 拿到卡的 XML，找到 `CameraWidth` / `CameraHeight` / `DeviceTapGeometry` 的地址
+- [x] 卡的 XML 核对第 4 节所有推测地址
+- [x] 邮箱写白名单按 XML 加 5 个卡参数（驱动白名单不用改：卡参数走邮箱）
+- [ ] 上板：读 `CardParam` 当前值，再按 BRINGUP 第 5½ 节做 16K 宽度实验
+- [ ] 0x10002020 bit3..6 的含义（XML 没定义）
