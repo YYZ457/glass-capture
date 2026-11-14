@@ -55,13 +55,13 @@ apps ─▶ stream ─▶ processing
 
 | 文件 | 职责 | 状态 |
 |---|---|---|
-| `sg_session` | 会话、超时参数、读写小工具、帧释放 | 🟡 已写，电脑上假卡测试通过，未上板 |
-| `sg_mailbox` | 邮箱报文收发 | 🟡 已写，电脑上假卡测试通过，未上板 |
-| `sg_preflight` | 只读体检 | 🟡 已写，电脑上假卡测试通过，未上板 |
-| `sg_block` | 块头读取、校验（纯函数）、分块 DMA | 🟡 已写，电脑上假卡测试通过，未上板 |
-| `sg_acq` | 开始 / 取块 / 停止状态机，单帧便捷函数 | 🟡 已写，电脑上假卡测试通过，未上板 |
-| `sg_cardxml` | 从卡存储读出卡自己的 GenICam XML（URL 在逻辑地址 0x190）| 🟡 [逆向]，假卡测过；只用邮箱读，旧驱动即可 |
-| `sg_io_linux` | 回调表的 ioctl 实现（原来两个程序各抄一份，现合并）| 🟡 已写，只能上板验证 |
+| `sg_session` | 会话、超时参数、读写小工具、帧释放 | ✅ 实机单帧与读 XML 验证通过 |
+| `sg_mailbox` | 邮箱报文收发 | ✅ 实机验证通过（严格寄存器读 + 存储块读 `sg_mbx_read_block`） |
+| `sg_preflight` | 只读体检 | ✅ 实机验证通过 |
+| `sg_block` | 块头读取、校验（纯函数）、分块 DMA | ✅ 实机单帧采集验证通过 |
+| `sg_acq` | 开始 / 取块 / 停止状态机，单帧便捷函数 | ✅ 实机单帧采集验证通过 |
+| `sg_cardxml` | 从卡存储读出卡自己的 GenICam XML（URL 在逻辑地址 0x190）| ✅ 实机读出 `SG3000V100R001C00XB046.zip`（38,217 B，每包固定 `0x100` 请求） |
+| `sg_io_linux` | 回调表的 ioctl 实现（原来两个程序各抄一份，现合并）| ✅ 实机验证通过 |
 
 ### board/processing/ — 一块像素进，一个结果出
 
@@ -99,8 +99,8 @@ apps ─▶ stream ─▶ processing
 
 | 文件 | 程序 | 状态 |
 |---|---|---|
-| `sg_status.c` | `sg_status` 只读体检；`--card-xml DIR` 读卡 XML | 🟡 已写，只能上板验证 |
-| `sg_capture_main.c` | `sg3000-capture` 单帧；`send` 经网口发图；`camera-probe` 经串口读相机型号；`version` | 🟡 已写，上板后与 legacy 逐字节对比 |
+| `sg_status.c` | `sg_status` 只读体检；`--card-xml DIR` 读卡 XML | ✅ 实机体检与 `--card-xml` 读出均通过 |
+| `sg_capture_main.c` | `sg3000-capture` 单帧；`send` 经网口发图；`camera-probe` 经串口读相机型号；`version` | ✅ `preflight` / `capture`（4096×2000）/ `version` 实机通过；`send` 和 `camera-probe` 待测 |
 | `sg_stream_main.c` | `sg3000-stream` 连续；`--processor candidates`、`--tcp` | 🟡 已迁移，合成源跑通；硬件源没上板 |
 | `pgm_write` | 原子写 PGM | 🟡 已写，电脑上测试通过 |
 

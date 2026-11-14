@@ -192,11 +192,19 @@ int main(void)
         url[SG_CARDXML_URL_LEN] = 0;
         CHECK(!strcmp(url, CARD_URL));
         CHECK(sg_cardxml_parse_url(url, name, sizeof name, &a, &l) == SG_CARDXML_LOCAL && a == 0x4000 && l == 10);
-        memset(xml, 0, sizeof xml);
-        CHECK(sg_cardxml_read(&s, a, xml, l, 1000) == 0 && !memcmp(xml, CARD_XML, 10) && xml[10] == 0);
-        CHECK(s.request_id == 3 && C.regs_written_bad == 0);   /* URL 256 字节 1 包；XML 10 字节 = 8 字节 1 包 + 尾巴 1 包 */
-        CHECK(C.tx[6] == 4);                                  /* 最后一包是 4 字节尾巴 */
-        CHECK(!memcmp(s.last_reply, "\xaa\x55\x00\x00", 4) && s.last_reply_len == 32);
+        memset(xml, 0x5a, sizeof xml);
+        CHECK(sg_cardxml_read(&s, a, xml, l, 1000) == 0 && !memcmp(xml, CARD_XML, 10) && xml[10] == 0x5a);
+        CHECK(s.request_id == 2 && C.regs_written_bad == 0);   /* URL 256B 1 包；XML 10B 也按 256B 读 1 包，只拷前 10B */
+        CHECK(C.tx[6] == SG_MBX_BLOCK_MAX);
+        CHECK(!memcmp(s.last_reply, "\xaa\x55\x00\x00", 4) && s.last_reply_len == 28u + SG_MBX_BLOCK_MAX);
+        /* 多包 + 非 4 字节对齐尾巴（如实板 38217 = 149*256 + 73）：每包都请求 256B 且不越界覆盖哨兵 */
+        {
+            unsigned char big[SG_MBX_BLOCK_MAX + 74u];
+            memset(big, 0x5a, sizeof big);
+            CHECK(sg_cardxml_read(&s, a, big, SG_MBX_BLOCK_MAX + 73u, 1000) == 0);
+            CHECK(!memcmp(big, CARD_XML, 10) && big[SG_MBX_BLOCK_MAX + 73u] == 0x5a);
+            CHECK(s.request_id == 4 && C.tx[6] == SG_MBX_BLOCK_MAX);
+        }
         CHECK(sg_cardxml_read(&s, 0x191, xml, 4, 1000) == -EINVAL);
         /* 实板现象：卡存储回复偏移 16 非 0 → 严格读 -EPROTO，块读（Windows 的检查）照常 */
         reset(); sg_capture_session_init(&s, &IO); C.storage_status = 1;

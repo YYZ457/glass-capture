@@ -63,24 +63,25 @@ int sg_cardxml_parse_url(const char *url, char *name, size_t name_cap, uint32_t 
 int sg_cardxml_read(struct sg_capture_session *s, uint32_t addr, void *buf, uint32_t len,
                     uint32_t timeout_ms)
 {
-    unsigned char *out = buf, tail[4];
+    unsigned char *out = buf, blk[SG_MBX_BLOCK_MAX];
     uint32_t done = 0, n;
     int ret;
 
     if (!s || !buf || !len || (addr & 3u) || (uint64_t)addr + len > 0x100000000ull) return -EINVAL;
-    /* 照 Windows：每包 0x100 字节 */
-    while (len - done >= 4) {
+    /* 照实板/Windows：存储块读每包固定请求 0x100 字节；实板对不足 0x100 的请求也回 0x100 字节。
+     * 最后一包若不足 0x100 字节，先读进临时缓冲再截断拷贝，避免回包长度校验误报 -EPROTO。 */
+    while (done < len) {
         n = len - done;
-        if (n > SG_MBX_BLOCK_MAX) n = SG_MBX_BLOCK_MAX;
-        n &= ~3u;
-        ret = sg_mbx_read_block(s, addr + done, out + done, n, timeout_ms);
-        if (ret) return ret;
-        done += n;
-    }
-    if (done < len) {                       /* 不足 4 字节的尾巴：读一个字，只取需要的 */
-        ret = sg_mbx_read_block(s, addr + done, tail, 4, timeout_ms);
-        if (ret) return ret;
-        memcpy(out + done, tail, len - done);
+        if (n >= SG_MBX_BLOCK_MAX) {
+            ret = sg_mbx_read_block(s, addr + done, out + done, SG_MBX_BLOCK_MAX, timeout_ms);
+            if (ret) return ret;
+            done += SG_MBX_BLOCK_MAX;
+        } else {
+            ret = sg_mbx_read_block(s, addr + done, blk, SG_MBX_BLOCK_MAX, timeout_ms);
+            if (ret) return ret;
+            memcpy(out + done, blk, n);
+            done += n;
+        }
     }
     return 0;
 }
