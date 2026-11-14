@@ -41,6 +41,7 @@
 #include "cam_serial.h"
 #include "cam_xml.h"
 #include "cam_set.h"
+#include "sg_pgmcheck.h"
 #include "sg_mailbox.h"
 #include "sg3000_regs.h"
 #include "sg_err.h"
@@ -70,6 +71,7 @@ static void usage(void)
          "         ClConfiguration 0|3, DeviceTapGeometry 2|3 (Base only), TestPattern 0|1|2|3|5,\n"
          "         ExposureTime <us>, DigitalGain <0.10..15.99>, AnalogGain 0..4 (=1.25/1.75/2/3/4x), LineRate <Hz>\n"
          "         other camera commands are read-only; all need insmod sg3000_rx.ko cam_serial=1, default baud 115200\n"
+         "       sg3000-capture pgm-stats FILE.pgm [--thumb OUT.pgm] [--thumb-factor 16]   (no card access)\n"
          "       sg3000-capture card-set NAME VALUE [--device PATH]\n"
          "         NAME: CameraWidth CameraHeight DeviceTapGeometry ClConfiguration CameraScanType\n"
          "       sg3000-capture version\n"
@@ -651,6 +653,63 @@ out:
     return ret ? 1 : 0;
 }
 
+/* sg3000-capture pgm-stats FILE [--thumb OUT.pgm] [--thumb-factor N]：
+ * 在板上检查一张图（亮度、8 个位、测试图渐变公式），可选存一张缩略图（够小，能经串口取回）。
+ * 不碰采集卡。 */
+static int pgm_stats_main(int argc, char **argv)
+{
+    const char *thumb = NULL;
+    unsigned long factor = 16;
+    struct sg_capture_frame frame, small;
+    struct sg_pgm_check c;
+    char *end;
+    int a, k, ret;
+
+    if (argc < 3) { usage(); return 2; }
+    for (a = 3; a < argc; ++a) {
+        if (!strcmp(argv[a], "--thumb") && a + 1 < argc) thumb = argv[++a];
+        else if (!strcmp(argv[a], "--thumb-factor") && a + 1 < argc) {
+            factor = strtoul(argv[++a], &end, 10);
+            if (*end || factor < 1 || factor > 256) { usage(); return 2; }
+        } else { usage(); return 2; }
+    }
+    ret = pgm_read(argv[2], &frame, SG_CAPTURE_MAX_BYTES);
+    if (ret) goto out;
+    ret = sg_pgm_check(frame.data, frame.width, frame.height, &c);
+    if (!ret) {
+        printf("PGMStats %s %ux%u min=%u max=%u mean=%.3f p1=%u p50=%u p99=%u saturated=%llu\n", argv[2],
+               c.width, c.height, c.min, c.max, c.mean, c.p1, c.p50, c.p99, (unsigned long long)c.saturated);
+        printf("PGMBits OR=0x%02x missing=", c.or_all);
+        for (k = 0, a = 0; k < 8; ++k) if (!(c.or_all >> k & 1)) printf("%s%d", a++ ? "," : "", k);
+        printf("%s tap0=0x%02x tap1=0x%02x tap2=0x%02x\n", a ? "" : "none", c.or_tap[0], c.or_tap[1], c.or_tap[2]);
+        printf("PGMRamp");
+        for (k = 0; k < SG_RAMP_COUNT; ++k) {
+            if (c.ramp_mismatch[k]) printf(" %s=%llu_mismatched", sg_ramp_name(k), (unsigned long long)c.ramp_mismatch[k]);
+            else printf(" %s=MATCH", sg_ramp_name(k));
+        }
+        printf("\nPGMFlat all0=%s all255=%s\n", c.all_zero ? "yes" : "no", c.all_255 ? "yes" : "no");
+    }
+    if (!ret && thumb) {
+        uint32_t tw = 0, th = 0;
+        memset(&small, 0, sizeof small);
+        small.data = malloc((size_t)(frame.width / factor) * (frame.height / factor) + 1);
+        if (!small.data) ret = -ENOMEM;
+        if (!ret) ret = sg_pgm_thumb(frame.data, frame.width, frame.height, (uint32_t)factor, small.data, &tw, &th);
+        if (!ret) {
+            small.width = tw;
+            small.height = th;
+            small.length = (size_t)tw * th;
+            ret = pgm_write(thumb, &small);
+            if (!ret) printf("PGMThumb %s %ux%u (1/%lu)\n", thumb, tw, th, factor);
+        }
+        free(small.data);
+    }
+    sg_capture_frame_free(&frame);
+out:
+    if (ret) fprintf(stderr, "Failed: %s (%d)\n", strerror(-ret), ret);
+    return ret ? 1 : 0;
+}
+
 /* sg3000-capture card-set NAME VALUE：写一个卡参数（地址和值域来自卡的 XML）。
  * 只在采集已停止（SG_ACQ_STATE = "STOP"）时写；写前读一次、写后读回核对。 */
 static const struct { const char *name; uint32_t addr; } CARD_SET[] = {
@@ -770,6 +829,9 @@ int main(int argc, char **argv)
     }
     if (!strcmp(argv[1], "camera-set")) {
         return camera_set_main(argc, argv);
+    }
+    if (!strcmp(argv[1], "pgm-stats")) {
+        return pgm_stats_main(argc, argv);
     }
     if (!strcmp(argv[1], "card-set")) {
         return card_set_main(argc, argv);

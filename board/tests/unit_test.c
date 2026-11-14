@@ -20,6 +20,7 @@
 #include "sg_cardxml.h"
 #include "cam_xml.h"
 #include "cam_set.h"
+#include "sg_pgmcheck.h"
 #include "sg3000_regs.h"
 
 static struct sg_image_view view(unsigned char *p, uint32_t w, uint32_t h)
@@ -336,10 +337,40 @@ static void test_cam_set(void)
     puts("cam set ok");
 }
 
+/* 板上版 V1：渐变公式、位统计、亮度分位、缩略图。 */
+static void test_pgmcheck(void)
+{
+    enum { W = 768, H = 4 };
+    static uint8_t img[W * H], thumb[(W / 16) * 1];
+    struct sg_pgm_check c;
+    uint32_t x, y, tw, th;
+
+    for (y = 0; y < H; ++y) for (x = 0; x < W; ++x) img[y * W + x] = (uint8_t)x;
+    assert(sg_pgm_check(img, W, H, &c) == 0);
+    assert(c.or_all == 0xff && c.min == 0 && c.max == 255 && c.ramp_mismatch[SG_RAMP_X] == 0);
+    assert(c.ramp_mismatch[SG_RAMP_ROW_START] == 0 && c.ramp_mismatch[SG_RAMP_SCALED] != 0 && !c.all_zero);
+    assert(c.saturated == 3u * H && c.p50 == 127);
+    for (x = 0; x < W * H; ++x) img[x] &= 0x3f;              /* 最高两位丢了 */
+    assert(sg_pgm_check(img, W, H, &c) == 0 && c.or_all == 0x3f && c.max == 63 && c.ramp_mismatch[SG_RAMP_X] != 0);
+    for (y = 0; y < H; ++y) for (x = 0; x < W; ++x) img[y * W + x] = (uint8_t)(x + 7 * y);   /* 移动渐变 */
+    assert(sg_pgm_check(img, W, H, &c) == 0 && c.ramp_mismatch[SG_RAMP_ROW_START] == 0 && c.ramp_mismatch[SG_RAMP_X] != 0);
+    memset(img, 255, sizeof img);
+    assert(sg_pgm_check(img, W, H, &c) == 0 && c.all_255 && c.saturated == (uint64_t)W * H);
+    for (x = 0; x < W * H; ++x) img[x] = (uint8_t)(x % W < 384 ? 0 : 200);
+    {
+        static uint8_t t2[(W / 4) * (H / 4)];
+        assert(sg_pgm_thumb(img, W, H, 4, t2, &tw, &th) == 0 && tw == W / 4 && th == 1);
+        assert(t2[0] == 0 && t2[tw - 1] == 200);
+    }
+    assert(sg_pgm_thumb(img, W, H, 0, thumb, &tw, &th) == -EINVAL);
+    assert(sg_pgm_check(NULL, W, H, &c) == -EINVAL);
+    puts("pgmcheck ok");
+}
+
 int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
-    test_view_stats(); test_candidates(); test_linecheck(); test_pipeline(); test_cam_serial(); test_cardxml_url(); test_cam_manifest(); test_cam_set();
+    test_view_stats(); test_candidates(); test_linecheck(); test_pipeline(); test_cam_serial(); test_cardxml_url(); test_cam_manifest(); test_cam_set(); test_pgmcheck();
     puts("unit: ALL PASS");
     return 0;
 }

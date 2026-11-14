@@ -5,6 +5,7 @@
 
 ## 先读
 
+0. `docs/NEXT_STEPS.md` —— 现状、下次上板做什么、协作规则（谁推 `main`、谁只提交 `.ko`）
 1. `docs/OVERVIEW.md` —— 哪些是黑箱、哪些还在攻关
 2. `ARCHITECTURE.md` —— 每个文件的职责和状态（✅ 实机证明 / 🟡 写了没上板 / ⬜ 空 / ❓ 缺资料）
 3. `docs/BRINGUP.md` —— 上板操作步骤

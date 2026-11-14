@@ -88,6 +88,7 @@ apps ─▶ stream ─▶ processing
 | `cam_regs.h` | 相机寄存器地址 | ✅ 已用从相机读出的 16K XML 逐条核对（更正波特率地址、时钟 96 MHz）|
 | `cam_serial` | 串口邮箱初始化 / 收发 / 波特率 + GenCP 读写 | ✅ 实机 `cam_serial=1` + `port=0, baud=115200` 读出 `JAI / SW-WS2-CL16K-50M-SDE`；单路卡禁碰 port1（见 `docs/bringup_report_2026-11-14.md`） |
 | `cam_xml` | GenCP 清单表 → 从相机本身读 GenICam XML；按块读内存（重试 + 清残留）| ✅ 实板读出相机 XML（18,279 B，2 s）|
+| `processing/sg_pgmcheck` | 板上查图：亮度分位、8 个位、测试图渐变公式、缩略图（`sg3000-capture pgm-stats`）| 🟡 单测通过 |
 | `cam_set` | `camera-set` 白名单 + 换算（CL 模式、Tap、测试图、曝光、数字/模拟增益）| 🟡 单测通过；CL 模式 / Tap 已实板写通，其余待测 |
 | `cam_config` | 宽度、行频、曝光、触发、测试图案、User Set | 🟡 已写在 cam_serial 之上；地址待 16K XML 核对 |
 
@@ -105,6 +106,7 @@ apps ─▶ stream ─▶ processing
 | `sg_status.c` | `sg_status` 只读体检；`--card-xml DIR` 读卡 XML | ✅ 实机体检与 `--card-xml` 读出均通过 |
 | `sg_capture_main.c` | `sg3000-capture` 单帧；`send` 经网口发图；`card-set` / `camera-set`（白名单 + 读回）；`camera-probe` / `camera-xml` / `camera-regs` / `camera-read`（只读）；失败时打印 `FailedStage` / `LastHeader`；`version` | ✅ `preflight` / `capture`（4096×2000 及 Base 1X3 `16384×2000`）/ `version` / `card-set` / `camera-set` / `camera-probe`（port0）实机全部通过 |
 | `sg_stream_main.c` | `sg3000-stream` 连续；`--processor candidates`、`--tcp` | ✅ 合成源与真机 `--source hardware --processor stats`（`16384×2000`，`stop_error=0`）均实机通过 |
+| `board/scripts/board_session.sh` | 一键上板测试（BRINGUP 5⅞ + 5⁹），结果打包 | 🟡 busybox ash 下对假板子跑通；待上板 |
 | `pgm_write` | 原子写 PGM | 🟡 已写，电脑上测试通过 |
 
 ### 其他

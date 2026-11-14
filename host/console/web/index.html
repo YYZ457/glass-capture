@@ -50,6 +50,7 @@
         <button data-action="camera_probe" class="action" disabled><b>C1</b><div><strong>相机信息</strong><small>只读：经 CL 串口读相机型号、序列号、XML 清单（需新驱动）</small></div><span>↗</span></button>
         <button data-action="camera_xml" class="action" disabled><b>C2</b><div><strong>读取相机 XML</strong><small>只读：从相机本身读出 GenICam XML 存到电脑，不需要 Windows</small></div><span>↗</span></button>
         <button data-action="camera_regs" class="action" disabled><b>C3</b><div><strong>读相机寄存器</strong><small>只读：按相机 XML 读宽度、像素格式、Tap、CL 配置、行频</small></div><span>↗</span></button>
+        <button data-action="board_session" class="action" disabled><b>S</b><div><strong>一键上板测试</strong><small>测试图、调亮、DMA 吞吐、15 kHz 一次跑完（约 3–5 分钟），结果包自动取回（BRINGUP 5⅞ + 5⁹）</small></div><span>↗</span></button>
         <button data-action="preflight" class="action" disabled><b>03</b><div><strong>检查采集条件</strong><small>读取 DDR、CL1 时钟与图像格式</small></div><span>↗</span></button>
         <button data-action="capture" class="action capture" disabled><b>04</b><div><strong>采集一帧</strong><small>极速单帧采集 · 保存至板上内存</small></div><span>↗</span></button>
         <button data-action="fetch_last" class="action" disabled><b>05</b><div><strong>回传最新图像到电脑</strong><small>网口已配置走网口（约 1 秒），否则走 USB 串口（约 7 分钟）</small></div><span>📥</span></button>

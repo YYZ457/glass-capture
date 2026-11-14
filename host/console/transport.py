@@ -284,7 +284,7 @@ class Console:
         return output
 
     def start(self, action, options=None):
-        if action not in {'probe', 'prepare', 'preflight', 'capture', 'fetch_last', 'dmesg', 'release', 'prepare_stream', 'stream', 'replay', 'status', 'network', 'card_xml', 'card_set', 'camera_probe', 'camera_xml', 'camera_regs', 'camera_set'}:
+        if action not in {'probe', 'prepare', 'preflight', 'capture', 'fetch_last', 'dmesg', 'release', 'prepare_stream', 'stream', 'replay', 'status', 'network', 'card_xml', 'card_set', 'camera_probe', 'camera_xml', 'camera_regs', 'camera_set', 'board_session'}:
             raise ValueError('未知操作。')
         with self.lock:
             if action != 'replay' and (not self.connected or not self.shell_ready):
@@ -353,7 +353,8 @@ class Console:
             if rc:
                 raise RuntimeError('SD 卡第一个分区根目录下没有 glass-capture 文件夹。按 docs/BRINGUP.md 第 1 步拷贝。')
             self.run_checked(f"cd {SD_BUNDLE} && test -s SHA256SUMS && tr -d '\\r' < SHA256SUMS | sha256sum -c && mkdir -p {BOARD_DIR} /run && "
-                             f"cp sg3000-capture sg3000-stream sg_status {BOARD_DIR}/ && chmod 700 {BOARD_DIR}/sg*", 20)
+                             f"cp sg3000-capture sg3000-stream sg_status {BOARD_DIR}/ && chmod 700 {BOARD_DIR}/sg* && "
+                             f"if [ -f board_session.sh ]; then cp board_session.sh {BOARD_DIR}/ && chmod 700 {BOARD_DIR}/board_session.sh; fi", 20)
             # 驱动：新目录里有就用新目录的（已由 SHA256SUMS 校验），否则用旧目录里校验过的那一份
             self.run_checked(f"if [ -f {SD_BUNDLE}/sg3000_rx.ko ]; then cp {SD_BUNDLE}/sg3000_rx.ko {BOARD_DIR}/; "
                              f"else cd {SD_LEGACY} && test -s SHA256SUMS && tr -d '\\r' < SHA256SUMS | grep ' sg3000_rx.ko$' | sha256sum -c && cp sg3000_rx.ko {BOARD_DIR}/; fi", 20)
@@ -478,6 +479,36 @@ class Console:
                                                  'AcquisitionLineRate', 'ExposureTime')}
         return (f'已读相机寄存器（{len(rows)} 项，已存 {out_file}）。' +
                 '；'.join(f'{k}={v}' for k, v in key.items()))
+
+    def _board_session(self):
+        """一键上板测试：板上跑 board_session.sh（BRINGUP 5⅞ + 5⁹，约 3–5 分钟），取回结果包并解开。"""
+        import tarfile
+        rc, _ = self.exchange(f"test -f {BOARD_DIR}/board_session.sh", 10)
+        if rc:
+            raise RuntimeError('板上没有 board_session.sh：SD 卡里的 glass-capture/ 是旧版。用新 dist 更新 SD 卡，再做「02 从 SD 加载程序」。')
+        self.event('system', '一键上板测试开始：会重载驱动、切相机和卡到 Base 3 Tap / 16384、拍测试图、调曝光增益、测 DMA 吞吐和 15 kHz。'
+                             '全部断电可恢复，约 3–5 分钟，请不要中断。')
+        rc, output = self.exchange(f"sh {BOARD_DIR}/board_session.sh 2>&1", 1800)
+        saved = re.search(r'BoardSession saved: (\S+\.tar\.gz) \((\d+) bytes', output)
+        if not saved:
+            raise RuntimeError('一键测试没有生成结果包：' + output[-600:])
+        local, n, *_ = self._fetch_file_from_board(saved.group(1), CAPTURES / 'board-session', preview=False)
+        folder = Path(local).parent
+        with tarfile.open(local, 'r:gz') as tar:
+            # 只解普通文件、只解到 folder 里面（不用 extractall：老版本 Python 没有安全过滤）
+            for member in tar.getmembers():
+                target = (folder / member.name).resolve()
+                if not member.isfile() or folder.resolve() not in target.parents:
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(tar.extractfile(member).read())
+        failed = re.search(r'== Summary: (\d+) step', output)
+        lines = [l.strip() for l in output.replace('\r', '').splitlines()
+                 if l.strip().startswith(('StreamSummary', 'Ramp ', 'FAIL', 'SKIP'))]
+        head = f"一键测试完成：{failed.group(1) if failed else '?'} 步失败。结果已存到 {folder}（session.log、summary.txt、缩略图）。"
+        if rc and not failed:
+            raise RuntimeError(head + ' 脚本中途退出：' + output[-400:])
+        return head + ' ' + '；'.join(lines[:8]) + '。把整个文件夹发给 Claude。'
 
     def _parse_preflight_status(self, output):
         ddr = re.search(r'DDR status\s+(\d+)', output)

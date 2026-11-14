@@ -22,6 +22,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 PROGRAMS = ("sg3000-capture", "sg3000-stream", "sg_status")
+SCRIPTS = {"board_session.sh": REPO / "board" / "scripts" / "board_session.sh"}   # 总是取仓库里的版本
 CROSS = "aarch64-linux-gnu-"
 
 
@@ -58,6 +59,9 @@ def main(argv=None):
     bin_dir = args.bin_dir or build(REPO / "board" / "out-arm64")
     # 先把要用的文件全部读进内存：--bin-dir 可以就是输出目录本身，删目录前不能丢
     blobs = {name: (bin_dir / name).read_bytes() for name in PROGRAMS}
+    for name, src in SCRIPTS.items():
+        # 写成 Unix 换行：Windows 检出可能带 \r\n，板上 sh 不认
+        blobs[name] = src.read_bytes().replace(b"\r\n", b"\n")
     ko = args.ko if args.ko else args.out / "sg3000_rx.ko"
     if ko.exists():
         blobs["sg3000_rx.ko"] = ko.read_bytes()
@@ -70,7 +74,7 @@ def main(argv=None):
     files = list(blobs)
     for name, data in blobs.items():
         (args.out / name).write_bytes(data)
-        if name in PROGRAMS:
+        if name in PROGRAMS or name in SCRIPTS:
             (args.out / name).chmod(0o755)
 
     sums = []

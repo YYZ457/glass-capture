@@ -321,3 +321,41 @@ def test_camera_set_and_two_cable_hint(board):
     status.chmod(0o755)
     job = run(console, "status")
     assert job["status"] == "error" and "第二根 Camera Link 线" in job["message"], job
+
+
+def test_board_session(board):
+    """一键上板测试：板上脚本跑完打包，中控台取回、安全解包、给出摘要。"""
+    import io
+    import tarfile
+    console, tmp = board
+    job = run(console, "board_session")                 # 板上还没有脚本
+    assert job["status"] == "error" and "board_session.sh" in job["message"], job
+    pkg = tmp / "pkg.tar.gz"
+    with tarfile.open(pkg, "w:gz") as tar:
+        for name, data in (("sg3000-session-x/session.log", b"log\n"), ("sg3000-session-x/summary.txt", b"Ramp ramp: x%256=MATCH\n"),
+                           ("../evil.txt", b"no")):
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    script = tmp / "board" / "board_session.sh"
+    script.write_text("#!/bin/sh\necho '  StreamSummary fast-15k received=225 discontinuities=0'\necho '  Ramp ramp: x%256=MATCH'\n"
+                      "echo '== Summary: 0 step(s) failed; dma_fast tested: 1 =='\n"
+                      f"echo 'BoardSession saved: {pkg} (123 bytes)'\n")
+    job = run(console, "board_session")
+    assert job["status"] == "success" and "0 步失败" in job["message"] and "received=225" in job["message"], job
+    out = tmp / "captures" / "board-session"
+    assert (out / "sg3000-session-x" / "summary.txt").read_bytes().startswith(b"Ramp")
+    assert not (tmp / "captures" / "evil.txt").exists()
+
+
+def test_bundle_contains_board_session_script(tmp_path):
+    """SD 包里带上 board_session.sh（Unix 换行），并进 SHA256SUMS。"""
+    bins = tmp_path / "bin"
+    bins.mkdir()
+    for name in ("sg3000-capture", "sg3000-stream", "sg_status"):
+        (bins / name).write_bytes(b"x")
+    out = tmp_path / "out"
+    subprocess.run([sys.executable, str(REPO / "tools" / "make_sd_bundle.py"), "--bin-dir", str(bins), "--out", str(out)],
+                   check=True, capture_output=True)
+    assert b"\r\n" not in (out / "board_session.sh").read_bytes()
+    assert "board_session.sh" in (out / "SHA256SUMS").read_text()
