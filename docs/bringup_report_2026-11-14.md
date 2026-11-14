@@ -226,3 +226,78 @@ VisionKit 读"设备 XML"走的就是 GenCP 标准清单表（BRM `0x1D0` → �
 
 - 用户态：`--port 1` 先读 camera enum，单路卡直接拒绝，不碰任何端口 1 寄存器（立即生效）。
 - 驱动：白名单删掉端口 1 的 `0x4130xx` 和 `0x110xx`（`driver_whitelist_test` 覆盖）。**需要重编 `.ko`**（I7 第 8.1 节同样的命令）。
+
+
+---
+
+## 8. `12c1249` 上板实测（BRINGUP 第 5¾ 节：相机 XML / 寄存器 / EightyBit 预检与 CL 芯片状态）
+
+- **测试条件**：拉取 `origin/main` `12c1249`（源码 `891003c` + 重编译 ARM64 工具），Windows 上用隔离镜像脚本重编通过 ABI 校验的 `sg3000_rx.ko`（白名单已移除端口 1，405,288 bytes），四份文件全部通过 `SHA256SUMS` 校验后上板实测。
+
+### 8.1 C1 / C2：相机真实 XML 与 GenCP 清单（只读）
+
+- **C1 (`camera-probe`)**：中控台自动将驱动重载为 `cam_serial=Y`，`port=0 baud=115200` 读出：
+  - `CameraManufacturer=JAI`
+  - `CameraModel=SW-WS2-CL16K-50M-SDE`
+  - `CameraDeviceVersion=300.001.22`
+  - `CameraSerialNumber=SF1AJFF12602`
+  - `CameraGenCPVersion=1.2`
+  - `CameraCapability=0x00000e0100000000 MaxResponseMs=2000`
+  - `CameraSBRMAddress=0x10000`
+  - `CameraManifestTable=0x100000 entries=1`
+  - `CameraManifest[0] file=0.0.3 type=zip addr=0x800000 size=18279 sha1=none`
+- **C2 (`camera-xml`)**：用时 `2 s` 下载完成（18,279 bytes），已归档到仓库 [docs/vendor/camera_xml/SW-WS2-CL16K-50M-SDE_0.0.3.zip](vendor/camera_xml/SW-WS2-CL16K-50M-SDE_0.0.3.zip)，解压内部文件为 [SF6000V300R001C22XB003.xml](vendor/camera_xml/SF6000V300R001C22XB003.xml)（178,934 bytes）。
+
+### 8.2 C3 + 补充相机寄存器实测（全部只读，实锤相机输出模式）
+
+1. **C3 默认清单（`21 ok, 0 failed`，完整记录见 [camera-regs-20261114-055406.txt](vendor/camera_xml/camera-regs-20261114-055406.txt)）**：
+   - `DeviceScanType (0x01600004) = 1`（`Linescan`）
+   - `WidthMax (0x01303038) = 16384`，`Width (0x01303040) = 16384`，`Height (0x01303044) = 1`，`OffsetX (0x01303048) = 0`
+   - `PixelFormat (0x01401040) = 17301505 (0x1080001)`（`Mono8`）
+   - **`ClConfiguration (0x01501008) = 3`（`EightyBit`）**
+   - **`DeviceTapGeometry (0x01501010) = 10`（`Geometry_1X10`）**
+   - `ExposureMode (0x01001080) = 1`（`Timed`），`DigitalGain (0x0120604c) = 256`（`1.0`），`BlackLevel (0x0120c050) = 0`
+   - `BinningHorizontal (0x01302040) = 1`（`1x1`），`ReverseX (0x01301000) = 0`（`False`），`TestPattern (0x01100000) = 0`（`Off`）
+   - `UserSetSelector (0x01600310) = 1`（`UserSet1`），`UserSetDefaultSelector (0x01600320) = 1`（`UserSet1`）
+2. **针对相机真实 XML 命名补充读取 9 项时钟/行频/曝光寄存器（`sg3000-capture camera-regs`，`9 ok, 0 failed`）**：
+   > 注：这台 JAI 相机 XML 使用了自定义节点名（`CameraLinkClkFrequency`、`InternalLineRate`、`MeasuredLineRate`、`AllExposureTime`、`LineTriggerMode`），而非 SFNC 默认名，且换算引用常数 `SensorClockFrequency = 96`（MHz），因此 `genicam.py` 默认名表会跳过这几项。
+   - `CameraLinkClkFrequency (0x01501060) = 85`（`85M`，与卡测 `CameraClockMHz = 85.00~85.01` 完全一致）
+   - `LineTriggerMode (0x01001004) = 0`（`Off`，内触发连续行频），`LineTriggerSource (0x01006044) = 1`（`CC1`）
+   - `AllExposureTime (0x01001010) = 4800` / `MeasuredExposureTime (0x01001088) = 4800` → `4800 / 96 = 50.0 us`
+   - `InternalLineRate (0x0100101c) = 9600` / `MeasuredLineRate (0x01001038) = 9600` → `96,000,000 / 9600 = 10000.0 Hz`（与卡测 `LineRateHz = 10000.0` 完全一致）
+   - `FieldCount (0x01208000) = 1`，`CameratvalidCount (0x01501064) = 27427`
+
+**结论**：彻底证实了 Claude 第 7 节判断——相机侧确实出的是 **16384 宽 × Mono8 × EightyBit（`Geometry_1X10`）× 85 MHz × 10 kHz 行频**。
+
+### 8.3 第 5 步实测：卡切 `ClConfiguration=4 / CameraWidth=16384` 被预检拦下，且发现 CL 芯片状态变化
+
+1. **写入卡参数读回确认**：
+   - `card-set ClConfiguration 4`：`0 → 4`（已读回确认）。紧接着执行 `card-set DeviceTapGeometry 10` 时返回 `10 → 10`，说明卡固件在 `ClConfiguration=4` 时已自动把 `DeviceTapGeometry` 切到了 `10`。
+   - `card-set CameraWidth 16384`：`4096 → 16384`（已读回确认）。
+2. **`02½ status` 与 `04 capture` 均在 `preflight` 立即失败（`-95`）**：
+   - `capture` 原文输出：
+     ```text
+     SG3000 0000:01:00.0, C2H0 AXI MM, ABI 1
+     DDRInitialStatus=2, CameraLinkPixelClocks=0x00000019, CL=4, Color=0, Depth=8
+     FailedStage: preflight
+     LastHeader none (no block header was read)
+     Failed: Operation not supported (-95)
+     ```
+   - 根因：`board/capture/sg_preflight.c:77` 仍写死 `if (p->cl_configuration != 0 || p->camera_color != 0 || p->camera_depth != 8u) return -ENOTSUP;`，尚未放开 `cl_configuration == 4`（`EightyBit`）。
+3. **关键附加现象：`ClConfiguration` 切为 `4` 后卡侧 FPGA 状态变化**：
+
+| 寄存器 / 指标 | `ClConfiguration=0`（改前，宽 4096） | `ClConfiguration=4`（宽 16384，Tap=10） | 切回 `ClConfiguration=0`（宽仍 16384） |
+| :--- | :--- | :--- | :--- |
+| `CLChipStatus (0x10002038)` | `3` (`bit0=1, bit1=1`) | **`2` (`bit0=0` Link Failed, `bit1=1` Link Ok)** | 立即恢复 `3` |
+| `pixel clocks (0x10002020)` | `0x59` (`bits 0, 3, 4, 6`) | `0x19` (`bits 0, 3, 4`) | 保持 `0x19` |
+| `LinePeriod10ns (0x105400b8)` | `9999` → **`LineRateHz = 10000.0`** | **`377634666 (0x16823f6a)` → `0.3 Hz`** | 立即恢复 `9999` → **`10000.0`** |
+| `CameraClockMHz (0x10540050)` | `85.01` | `85.00` | `85.01` |
+| `CLFvalLval (0x10002028)` | `9` | `9` | `9` |
+
+### 8.4 给 Claude 的下一步交接问题
+
+1. **放开软件预检**：`board/capture/sg_preflight.c:77`（及 `sg_status.c` 提示）需要允许 `ClConfiguration = 4`（EightyBit）。
+2. **排查切 `ClConfiguration = 4` 后 `CLChipStatus` 掉 bit0、卡测行频停在 `0.3 Hz` 的原因**：
+   - 卡 XML 定义 `0x10002038` bit0..3 对应 `CameraLinkChipStatus / Chip1Status / Chip2Status / Chip3Status`，同时在卡 XML 中紧挨着还有 `CameraLinkReLink (0x10002C00, WO, cmd=1)` 和 `CameraLinkAutoLink (0x10002034, RW)`，以及分图相关 `Width(out)=4096`、`CameraImageWidth=8192`、`SplitEn=0`。
+   - 需要确认 `LusterGraber.dll` / VisionKit 在切换 `ClConfiguration=4 (EightyBit)` 时的完整初始化顺序（是否需要 `CameraLinkReLink` / 软复位，或者其它寄存器联动），否则即便放开 `preflight` 的 `-95`，卡 FPGA 在 `ClConfiguration=4` 下未锁进 `Chip0` 且 `LinePeriod10ns` 不计数时，开始采集仍可能收不到行数据。
+3. **`host/console/genicam.py` 选配优化**：`DEFAULT_FEATURES` 可补充 JAI 命名（`CameraLinkClkFrequency`、`InternalLineRate`、`MeasuredLineRate`、`AllExposureTime`、`LineTriggerMode`）以便 C3 直接读出时钟、行频与曝光。

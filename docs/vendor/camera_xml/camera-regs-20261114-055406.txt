@@ -1,0 +1,52 @@
+# SW-WS2-CL16K-50M-SDE_0.0.3.zip
+DeviceVendorName               0x00000004  "JAI"
+DeviceModelName                0x00000044  "SW-WS2-CL16K-50M-SDE"
+DeviceVersion                  0x000000c4  "300.001.22"
+DeviceFirmwareVersion          0x01600088  "V003"
+DeviceSerialNumber             0x00000144  "SF1AJFF12602"
+DeviceScanType                 0x01600004  1 (0x1) = Linescan
+SensorWidth                             -  unresolved: constant
+WidthMax                       0x01303038  16384 (0x4000)
+Width                          0x01303040  16384 (0x4000)  # raw value; Width = TO (TO = raw)
+Height                         0x01303044  1 (0x1)
+OffsetX                        0x01303048  0 (0x0)  # raw value; OffsetX = TO (TO = raw)
+PixelFormat                    0x01401040  17301505 (0x1080001) = Mono8
+PixelSize                               -  unresolved: constant
+ClConfiguration                0x01501008  3 (0x3) = EightyBit
+DeviceTapGeometry              0x01501010  10 (0xa) = Geometry_1X10
+AcquisitionMode                         -  unresolved: constant
+ExposureMode                   0x01001080  1 (0x1) = Timed
+DigitalGain                    0x0120604c  256 (0x100)  # raw value; DigitalGain = TO/256 (TO = raw)
+BlackLevel                     0x0120c050  0 (0x0)
+BinningHorizontal              0x01302040  1 (0x1) = 1x1
+ReverseX                       0x01301000  0 (0x0) = False
+TestPattern                    0x01100000  0 (0x0) = Off
+DeviceSerialPortBaudRate                -  unresolved: pAddress pSRBMOffsetReg is computed
+UserSetSelector                0x01600310  1 (0x1) = UserSet1
+UserSetDefaultSelector         0x01600320  1 (0x1) = UserSet1
+DeviceTemperature                       -  unresolved: computed by SwissKnife pDeviceTemperatureReg
+
+# raw board output
+CameraRegs port=0 baud=115200 count=21
+CameraReg DeviceVendorName 0x4 = "JAI" hex 4a414900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+CameraReg DeviceModelName 0x44 = "SW-WS2-CL16K-50M-SDE" hex 53572d5753322d434c31364b2d35304d2d5344450000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+CameraReg DeviceVersion 0xc4 = "300.001.22" hex 3330302e3030312e3232000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+CameraReg DeviceFirmwareVersion 0x1600088 = "V003" hex 56303033000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+CameraReg DeviceSerialNumber 0x144 = "SF1AJFF12602" hex 534631414a4646313236303200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+CameraReg pDeviceScanTypeReg 0x1600004 = 0x1 (1)
+CameraReg pWidthMaxReg 0x1303038 = 0x4000 (16384)
+CameraReg pAOIWidthValueReg 0x1303040 = 0x4000 (16384)
+CameraReg pAOIHeightValueReg 0x1303044 = 0x1 (1)
+CameraReg pAOIOffsetXValueReg 0x1303048 = 0x0 (0)
+CameraReg pPixelFormatReg 0x1401040 = 0x1080001 (17301505)
+CameraReg pClConfigurationReg 0x1501008 = 0x3 (3)
+CameraReg pClFormatReg 0x1501010 = 0xa (10)
+CameraReg pExposureModeReg 0x1001080 = 0x1 (1)
+CameraReg pDigitalGainReg 0x120604c = 0x100 (256)
+CameraReg pBlackLevelReg 0x120c050 = 0x0 (0)
+CameraReg pBinningHReg 0x1302040 = 0x1 (1)
+CameraReg pFlipHReg 0x1301000 = 0x0 (0)
+CameraReg pTestPatternReg 0x1100000 = 0x0 (0)
+CameraReg pUserSetSelectorReg 0x1600310 = 0x1 (1)
+CameraReg pUserSetDefaultSelectorReg 0x1600320 = 0x1 (1)
+CameraRegs done: 21 ok, 0 failed
