@@ -193,3 +193,36 @@ CardParam CameraClockMHz      85.01   (819200 / (CameraClockCnt + 1), formula fr
    - 实板 `CLChipStatus=3`（2 颗 CL 芯片锁定）与 `col%3` 掩码 `0x47 / 0x46 / 0xc0` 显示，相机实际输出与当前卡的 `ClConfiguration=0 (Base) / DeviceTapGeometry=3 / Depth=8` 不一致；另外只把卡侧改为 `CameraWidth=16384` 时为何 `AcquisitionStart/Stop` 邮箱或阻塞机制在 ~2 秒 `-110` 超时（而 `LinePeriod10ns` 下 10 kHz × 2000 行本来只需 0.2s，且 `FrameRxCounter` 仍涨到了 5、`SG_HDR_READY=1`），需要结合超时和 `sg_acq` / 卡配置顺序核查。
 3. **补强单路卡 `port 1` 防护**
    - 在 `sg3000_rx.c` 和 `sg3000-capture camera-probe` 中依据 `camera enum` 拦截 `port >= 1` 的串口寄存器访问，避免再次触发 `nwl-pcie: Slave error` 导致整板需重启。
+
+---
+
+## 7. Claude 复核与已做的改动（同日，提交见 git log）
+
+### 7.1 16K 宽度 2 秒 -110：现在能定位，但根因很可能是 CL 模式不对
+
+- 2 秒 = 两个 1 秒超时相加：主流程一个 1 秒（**开始命令邮箱回包** 或 **首包 DMA**，两者默认都是 1000 ms），加上清理时 **停止命令邮箱** 又一个 1 秒。帧超时是 10 秒，所以不是"等块头"超时。
+- `poisoned 0` 排除不了 DMA：引擎根本没启动就超时时，驱动不会隔离。所以光看现有日志分不出是哪一个。
+- 已加诊断：`capture` 失败时多打印 `FailedStage`（开始 / 等块头 / 读块头 / 查块头 / DMA / 停止各一个名字）、`StopFailedStage`、`LastHeader`（块号、宽、行、包长、卡上地址）。另加 `--control-timeout-ms 1..2000`，用来验证是不是开始命令回包慢。
+- 但更根本的：卡按 Base 3 Tap 解码，而相机证据指向 Deca。先对齐模式（BRINGUP 第 5¾ 节），再看宽度。
+
+### 7.2 为什么判断相机在 Deca（待相机寄存器确认）
+
+| 证据 | 说明 |
+|---|---|
+| `CLChipStatus = 3` | 两颗 CL 接收芯片都锁了钟。Base 只用一颗；第二颗有钟说明相机在第二根线上也在发 |
+| 16384 × 50 kHz | = 819 Mpx/s。Base 3 Tap × 85 MHz 只有 255 Mpx/s；Deca 10 Tap × 85 MHz = 850 Mpx/s，刚好够 |
+| 手册 | "CameraLink Deca & Base"，数据位宽 Mono8 / 10bit |
+| 位图 | 24 位里只有 7 位在动、按 `col%3` 周期出现：80 位模式的位分配和 Base 端口 A/B/C 不同，按 Base 解就会是"错位的几位" |
+| 卡支持 | 卡 XML：`ClConfiguration` 有 `EightyBit = 4`，`Geometry_1X10_1Y` 只在 EightyBit + 8 位时可用（`N2110`）|
+
+### 7.3 相机 XML 不需要 Windows
+
+VisionKit 读"设备 XML"走的就是 GenCP 标准清单表（BRM `0x1D0` → 条目 → XML 地址/大小），已从 `VisionKitApi.dll` 确认地址和格式（I7 第 9 节）。新增：
+- 板上：`camera-probe`（补全 BRM 和清单表）、`camera-xml`、`camera-regs`、`camera-read`，全部只读。
+- 中控台：C1 相机信息 / C2 读取相机 XML（自动核对 SHA1）/ C3 读相机寄存器（`host/console/genicam.py` 解析 XML 并翻译枚举；已用采集卡 XML 验证：`CameraWidth → 0x10203008` 等全部对上）。
+- 相机命令会自动检查 `cam_serial`：`N` 时以 `cam_serial=1` 重载驱动；旧驱动直接报错。
+
+### 7.4 端口 1 防护
+
+- 用户态：`--port 1` 先读 camera enum，单路卡直接拒绝，不碰任何端口 1 寄存器（立即生效）。
+- 驱动：白名单删掉端口 1 的 `0x4130xx` 和 `0x110xx`（`driver_whitelist_test` 覆盖）。**需要重编 `.ko`**（I7 第 8.1 节同样的命令）。

@@ -30,6 +30,8 @@ APP = BOARD_DIR + '/sg3000-capture'
 STREAM_APP = BOARD_DIR + '/sg3000-stream'
 STATUS_APP = BOARD_DIR + '/sg_status'
 CARD_XML_DIR = BOARD_DIR + '/card-xml'   # 板上存卡 XML 的目录
+CAMERA_XML_DIR = BOARD_DIR + '/camera-xml'   # 板上存相机 XML 的目录
+CAM_SERIAL_PARAM = '/sys/module/sg3000_rx/parameters/cam_serial'
 APP_VERSION = 'sg3000-capture 1.0 ABI 1'
 STREAM_VERSION = 'sg3000-stream 0.2 ABI 1'
 
@@ -281,7 +283,7 @@ class Console:
         return output
 
     def start(self, action, options=None):
-        if action not in {'probe', 'prepare', 'preflight', 'capture', 'fetch_last', 'dmesg', 'release', 'prepare_stream', 'stream', 'replay', 'status', 'network', 'card_xml', 'card_set'}:
+        if action not in {'probe', 'prepare', 'preflight', 'capture', 'fetch_last', 'dmesg', 'release', 'prepare_stream', 'stream', 'replay', 'status', 'network', 'card_xml', 'card_set', 'camera_probe', 'camera_xml', 'camera_regs'}:
             raise ValueError('未知操作。')
         with self.lock:
             if action != 'replay' and (not self.connected or not self.shell_ready):
@@ -386,6 +388,88 @@ class Console:
                                + '。把日志里 == Card XML == 那一段发给 Claude。')
         local, n, *_ = self._fetch_file_from_board(saved.group(1), CAPTURES / 'card-xml', preview=False)
         return f'采集卡 XML 已存到电脑：{local}（{n:,} 字节）。把它发给 Claude：CameraWidth 等寄存器的地址就在里面。'
+
+    # ---- 相机（GenCP over Camera Link 串口，全部只读）--------------------------------
+
+    def _ensure_cam_serial(self):
+        """相机命令需要新驱动带 cam_serial=1。已是 Y 就不动；是 N 就重新加载（不影响采图）。"""
+        rc, out = self.exchange(f"cat {CAM_SERIAL_PARAM} 2>/dev/null || echo MISSING", 10)
+        state = out.replace('\r', '').strip().splitlines()[-1:] or ['']
+        if state[0] == 'Y':
+            return
+        if state[0] == 'MISSING':
+            raise RuntimeError('板上加载的是旧驱动（没有 cam_serial 参数），不能和相机通信。'
+                               'SD 卡 glass-capture/ 里放新编译的 sg3000_rx.ko，再做「02 从 SD 加载程序」。')
+        self.event('system', '正在以 cam_serial=1 重新加载驱动（只多放开相机串口端口 0，采图行为不变）。')
+        self.run_checked(f"rmmod sg3000_rx && insmod {BOARD_DIR}/sg3000_rx.ko cam_serial=1 && "
+                         f"test -e {DEV_NODE} && test \"$(cat {CAM_SERIAL_PARAM})\" = Y", 20)
+
+    def _camera_probe(self):
+        """只读：GenCP 读相机厂商、型号、序列号、XML 清单表。"""
+        self._ensure_cam_serial()
+        rc, output = self.exchange(f"{APP} camera-probe 2>&1", 60)
+        model = re.search(r'CameraModel=([^\r\n]*)', output)
+        if rc or not model:
+            raise RuntimeError('相机没有应答：' + output[-400:] + '。确认相机已上电、串口线（第一根 Camera Link 线）已接。')
+        manifest = re.findall(r'CameraManifest\[\d+\][^\r\n]*', output)
+        return f'相机：{model.group(1)}。XML 清单：' + ('；'.join(manifest) if manifest else '未列出')
+
+    def _latest_camera_xml(self):
+        path = getattr(self, 'camera_xml_path', None)
+        if path and Path(path).exists():
+            return Path(path)
+        folder = CAPTURES / 'camera-xml'
+        files = sorted((p for p in folder.glob('*') if p.suffix.lower() in ('.zip', '.xml')),
+                       key=lambda p: p.stat().st_mtime) if folder.exists() else []
+        return files[-1] if files else None
+
+    def _camera_xml(self):
+        """只读：经 GenCP 清单表从相机本身读出它的 GenICam XML，校验 SHA1，取回电脑。"""
+        self._ensure_cam_serial()
+        self.event('system', '正在经 Camera Link 串口从相机读 XML（115200 波特，几十 KB 约需 10–60 秒，大的几分钟），请不要中断。')
+        rc, output = self.exchange(f"mkdir -p {CAMERA_XML_DIR} && {APP} camera-xml {CAMERA_XML_DIR} 2>&1", 1800)
+        saved = re.search(r'CameraXML saved: (\S+) \((\d+) bytes', output)
+        if rc or not saved:
+            fail = re.search(r'CameraXML FAILED: ([^\r\n]*)', output)
+            raise RuntimeError('没读出相机 XML：' + (fail.group(1) if fail else output[-400:])
+                               + '。把日志里 CameraManifest 那几行和报错发给 Claude。')
+        remote = saved.group(1)
+        sha = re.search(r'CameraXML SHA1 expected ([0-9a-f]{40})', output)
+        if sha:
+            out = self.run_checked(f"sha1sum '{remote}'", 20)
+            if sha.group(1) not in out:
+                raise RuntimeError('相机 XML 的 SHA1 和相机清单里写的不一致（串口传输出错）。再读一次。')
+        local, n, *_ = self._fetch_file_from_board(remote, CAPTURES / 'camera-xml', preview=False)
+        self.camera_xml_path = str(local)
+        return (f'相机 XML 已存到电脑：{local}（{n:,} 字节' + ('，SHA1 与相机一致' if sha else '，相机没给 SHA1') +
+                '）。下一步点「读相机寄存器」核对相机实际输出格式。')
+
+    def _camera_regs(self):
+        """只读：按相机 XML 读出宽度、像素格式、Tap、CL 配置等，翻译成名字。"""
+        import genicam
+        xml = self._latest_camera_xml()
+        if xml is None:
+            raise RuntimeError('电脑上还没有相机 XML。先点「读取相机 XML」。')
+        model = genicam.Model(genicam.load_xml(xml.read_bytes()))
+        infos = genicam.features(model)
+        args = genicam.board_args(infos)
+        if not args:
+            raise RuntimeError(f'{xml.name} 里找不到可直接读的标准特征（Width、PixelFormat……）。把 XML 发给 Claude。')
+        self._ensure_cam_serial()
+        rc, output = self.exchange(f"{APP} camera-regs {' '.join(args)} 2>&1", 300)
+        if 'CameraRegs done' not in output:
+            raise RuntimeError('读相机寄存器失败：' + output[-400:])
+        rows = genicam.decode_board_output(infos, output)
+        report = '\n'.join(f'{n:28s} {("0x%08x" % a) if a is not None else "-":>12s}  {v}' for n, a, v in rows)
+        folder = CAPTURES / 'camera-xml'
+        folder.mkdir(parents=True, exist_ok=True)
+        out_file = folder / f"camera-regs-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
+        out_file.write_text(f'# {xml.name}\n' + report + '\n\n# raw board output\n' + output, encoding='utf-8')
+        self.event('system', '相机寄存器：\n' + report)
+        key = {n: v for n, _, v in rows if n in ('Width', 'PixelFormat', 'ClConfiguration', 'DeviceTapGeometry',
+                                                 'AcquisitionLineRate', 'ExposureTime')}
+        return (f'已读相机寄存器（{len(rows)} 项，已存 {out_file}）。' +
+                '；'.join(f'{k}={v}' for k, v in key.items()))
 
     def _parse_preflight_status(self, output):
         ddr = re.search(r'DDR status\s+(\d+)', output)

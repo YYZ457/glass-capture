@@ -42,11 +42,13 @@ static int stop_capture(struct sg_capture_session *s, uint32_t timeout_ms)
     uint64_t deadline;
     int ret;
 
+    s->stage = "AcquisitionStop mailbox";
     ret = sg_mbx_write(s, SG_L_ACQ_STOP, timeout_ms, 1);
     if (ret) {
         return ret;
     }
 
+    s->stage = "wait SG_ACQ_STATE = STOP";
     deadline = s->io.now_ms(s->io.context) + timeout_ms;
     for (;;) {
         if (s->io.now_ms(s->io.context) >= deadline) {
@@ -92,6 +94,7 @@ int sg_stream_begin(struct sg_capture_stream *st, struct sg_capture_session *s,
     st->options = *o;
 
     /* ① 预检：不通过就不开始。 */
+    s->stage = "preflight";
     ret = sg_capture_preflight(s, o->control_timeout_ms, &st->preflight);
     if (ret) {
         return ret;
@@ -101,6 +104,7 @@ int sg_stream_begin(struct sg_capture_stream *st, struct sg_capture_session *s,
     }
 
     /* ② 开始前不应该已经有数据块就绪，否则说明有残留，不去清理，直接报错。 */
+    s->stage = "check no stale block (SG_HDR_READY)";
     ret = sg_session_rd(s, SG_HDR_READY, &ready);
     if (ret) {
         return ret;
@@ -112,10 +116,12 @@ int sg_stream_begin(struct sg_capture_stream *st, struct sg_capture_session *s,
     /* ③ 从这里开始，只要走到了"尝试 START"，end 就必须做 STOP。
      *    所以先记下 start_attempted，哪怕下面的写失败了也要清理。 */
     st->start_attempted = 1;
+    s->stage = "write SG_ACQ_ARM";
     ret = sg_session_wr(s, SG_ACQ_ARM, SG_ACQ_ARM_VALUE);
     if (ret) {
         return ret;
     }
+    s->stage = "AcquisitionStart mailbox";
     ret = sg_mbx_write(s, SG_L_ACQ_START, o->control_timeout_ms, 0);
     if (!ret) {
         st->active = 1;
@@ -188,9 +194,11 @@ int sg_capture_once(struct sg_capture_session *s, const struct sg_capture_option
         ret = sg_stream_next(&st, &r->frame);
     }
     r->primary_error = ret;
+    r->primary_stage = ret ? s->stage : NULL;
 
     /* 不管前面成功与否，都要 STOP（end 自己会判断是否真的需要）。 */
     r->stop_error = sg_stream_end(&st);
+    r->stop_stage = r->stop_error ? s->stage : NULL;
     r->start_attempted = st.start_attempted;
     r->stop_attempted  = st.stop_attempted;
 

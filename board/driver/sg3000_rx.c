@@ -95,18 +95,19 @@ static void sg_release(struct kref *ref)
  * 关闭时这个驱动和旧版完全一样。 */
 static bool cam_serial;
 
-/* 串口邮箱 0x4110xx / 0x4130xx 内的偏移（-1 = 不是串口地址）；UART 寄存器 (port<<16)+0x1000.. 同理 */
+/* 串口邮箱 0x4110xx 内的偏移（-1 = 不是串口地址）；UART 寄存器 0x1000.. 同理。
+ * 只放开端口 0：2026-11-14 实板上，单路卡（camera enum 0x30424630）碰端口 1 的
+ * 0x4130xx / 0x110xx 会触发 nwl-pcie Slave error（synchronous external abort），整板要重启。
+ * 将来换双路卡，再按 camera enum 加回端口 1。 */
 static int sg_ser_reg(u32 off)
 {
     if (off >= 0x411000 && off < 0x411030) return (int)(off - 0x411000);
-    if (off >= 0x413000 && off < 0x413030) return (int)(off - 0x413000);
     return -1;
 }
 
 static int sg_uart_reg(u32 off)
 {
     if (off >= 0x1000 && off <= 0x100c) return (int)(off - 0x1000);
-    if (off >= 0x11000 && off <= 0x1100c) return (int)(off - 0x11000);
     return -1;
 }
 

@@ -29,6 +29,12 @@ struct sg_capture_session {
     /* 诊断用：最近一条邮箱回复的前 64 字节（出错时打印出来对照），不参与任何判断 */
     unsigned char last_reply[64];
     uint32_t last_reply_len;       /* 回复的完整字节数 */
+    /* 诊断用：采集走到了哪一步、最近一个块头的关键字段。出错时打印，不参与任何判断。 */
+    const char *stage;
+    struct {
+        int valid;
+        uint32_t block_id, seq, width, lines, max_lines, payload_len, dest_offset, src_addr;
+    } last_hdr;
 };
 
 /* 填默认超时。 */

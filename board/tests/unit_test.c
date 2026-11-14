@@ -18,6 +18,7 @@
 #include "sg_pipeline.h"
 #include "cam_serial.h"
 #include "sg_cardxml.h"
+#include "cam_xml.h"
 #include "sg3000_regs.h"
 
 static struct sg_image_view view(unsigned char *p, uint32_t w, uint32_t h)
@@ -249,10 +250,42 @@ static void test_cardxml_url(void)
     puts("cardxml url ok");
 }
 
+/* GenCP 清单条目解析（纯函数）。字节布局：文件版本 4、格式版本 4、地址 8、大小 8、SHA1 20，全部大端。 */
+static void test_cam_manifest(void)
+{
+    unsigned char b[CAM_MANIFEST_ENTRY_BYTES];
+    struct cam_manifest_entry e;
+    const unsigned char be[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+
+    assert(cam_be64(be) == 0x0102030405060708ull);
+    memset(b, 0, sizeof b);
+    b[0] = 1; b[1] = 2; b[2] = 0; b[3] = 3;          /* 文件版本 1.2.3 */
+    b[4] = 0x01; b[5] = 0x01; b[6] = 0x04; b[7] = 0;  /* 格式版本 1.1，bit10 = 1 → zip */
+    b[13] = 0x10; b[14] = 0x00;                        /* 地址 0x100000 */
+    b[21] = 0x01; b[22] = 0x86; b[23] = 0xa0;          /* 大小 100000 */
+    assert(cam_manifest_parse(b, &e) == 0);
+    assert(e.file_version == 0x01020003u && e.address == 0x100000u && e.size == 100000u);
+    assert(!strcmp(cam_manifest_ext(&e), ".zip") && !cam_manifest_has_sha1(&e));
+    b[30] = 0xab;
+    assert(cam_manifest_parse(b, &e) == 0 && cam_manifest_has_sha1(&e) && e.sha1[6] == 0xab);
+    b[6] = 0x00;                                        /* 类型 0 → xml */
+    assert(cam_manifest_parse(b, &e) == 0 && !strcmp(cam_manifest_ext(&e), ".xml"));
+    b[6] = 0x08;                                        /* 类型 2：不认识 */
+    assert(cam_manifest_parse(b, &e) == -EPROTO);
+    b[6] = 0x04;
+    b[21] = b[22] = b[23] = 0;                          /* 大小 0 */
+    assert(cam_manifest_parse(b, &e) == -EPROTO);
+    b[20] = 0x01;                                       /* 16 MiB > 上限 */
+    assert(cam_manifest_parse(b, &e) == -EPROTO);
+    memset(b + 8, 0xff, 8); b[20] = 0; b[23] = 0x10;    /* 地址 + 大小溢出 */
+    assert(cam_manifest_parse(b, &e) == -EPROTO);
+    puts("cam manifest ok");
+}
+
 int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
-    test_view_stats(); test_candidates(); test_linecheck(); test_pipeline(); test_cam_serial(); test_cardxml_url();
+    test_view_stats(); test_candidates(); test_linecheck(); test_pipeline(); test_cam_serial(); test_cardxml_url(); test_cam_manifest();
     puts("unit: ALL PASS");
     return 0;
 }

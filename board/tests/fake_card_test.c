@@ -258,6 +258,7 @@ int main(void)
     CHECK(sg_capture_once(&s, &o, &r) == 0);
     CHECK(r.frame.width == W && r.frame.height == MAXL && r.frame.length == W * MAXL);
     CHECK(r.frame.block_id == 7 && r.frame.packets == 2 && r.stop_error == 0 && r.start_attempted && r.stop_attempted);
+    CHECK(r.primary_stage == NULL && r.stop_stage == NULL);
     CHECK(C.started && C.stopped && C.dma_calls == 2 && C.regs_written_bad == 0);
     int ok = 1; for (size_t i = 0; i < r.frame.length; ++i) ok &= r.frame.data[i] == (unsigned char)(0x1000 + i);
     CHECK(ok);
@@ -277,6 +278,8 @@ int main(void)
     reset(); sg_capture_session_init(&s, &IO); C.bad_magic = 1;
     CHECK(sg_capture_once(&s, &o, &r) == -EPROTO);
     CHECK(r.stop_attempted && C.stopped && r.frame.data == NULL && r.primary_error == -EPROTO);
+    CHECK(r.primary_stage && !strcmp(r.primary_stage, "check block header") && r.stop_stage == NULL);
+    CHECK(s.last_hdr.valid && s.last_hdr.width == W && s.last_hdr.block_id == 7);
 
     /* 7. 开始前已有块就绪 → EBUSY，且不尝试 START */
     reset(); sg_capture_session_init(&s, &IO); C.hdr_ready = 1;
@@ -307,6 +310,7 @@ int main(void)
     reset(); sg_capture_session_init(&s, &IO);
     struct sg_capture_options small = o; small.max_frame_bytes = 64;
     CHECK(sg_capture_once(&s, &small, &r) == -EFBIG);
+    CHECK(r.primary_stage && !strcmp(r.primary_stage, "block size limit"));
 
     printf(fails ? "fake card: %d FAILED\n" : "fake card: ALL PASS\n", fails);
     return fails != 0;

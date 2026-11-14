@@ -94,7 +94,36 @@ python host/console/launch.py
 规矩：
 - 只改 `CameraWidth`，其他参数先不动。
 - 只能在采集停止时写（程序会自己检查）。
-- `ClConfiguration` 不要改：相机现在是 Base。
+- ~~`ClConfiguration` 不要改：相机现在是 Base。~~ 2026-11-14 实测推翻了这个假设（`CLChipStatus=3`、位错乱），见第 5¾ 节。
+
+**2026-11-14 结果**：写入读回正常、断电恢复 4096；但只改宽度后采图 2 秒报 -110。原因待第 5¾ 节第 5 步的 `FailedStage` 定位。
+
+## 5¾. 相机 XML 与 Camera Link 模式对齐（需要新驱动 cam_serial=1）
+
+**为什么要做**：4096 宽的基准图里 24 位只有 7 位在动（`col%3` 掩码 `0x47/0x46/0xc0`），而且卡报两颗 CL 芯片都锁了钟（`CLChipStatus=3`）。
+这说明相机很可能工作在 **Deca（80 位，10 Tap）**——16384 × 50 kHz 只有 Deca 带宽够，手册也写"支持 Deca 和 Base"——而卡还按 Base 3 Tap 解码。
+在这个前提下单改宽度没有意义。先从相机本身读出它的 XML 和实际配置，再让卡跟相机一致。
+
+前提：SD 卡用本次的新 `dist/glass-capture/`，加新编译的 `sg3000_rx.ko`（第 5 步之前不重编也能跑，端口 1 由程序拦截）。
+**不要用 `--port 1`**（单路卡，会让 PCIe 总线报错死机）。
+
+1. 「02 从 SD 加载程序」→「02½ 只读体检」。
+2. **C1 相机信息**：应看到 `CameraModel=SW-WS2-CL16K-50M-SDE` 和 `CameraManifest[0] ... type=zip ...`。中控台会自动以 `cam_serial=1` 重载驱动。
+   - 板上等价：`/tmp/sg3000-board/sg3000-capture camera-probe`
+3. **C2 读取相机 XML**：几十 KB 约 10–60 秒。成功显示"相机 XML 已存到电脑 …，SHA1 与相机一致"。文件在 `D:\SG3000_Captures\camera-xml\`。
+   - 板上等价：`/tmp/sg3000-board/sg3000-capture camera-xml /tmp/sg3000-board/camera-xml`
+4. **C3 读相机寄存器**：会列出 `Width`、`PixelFormat`、`ClConfiguration`、`DeviceTapGeometry`、`AcquisitionLineRate`、`ExposureTime` 等的当前值，存成 `camera-regs-*.txt`。
+   **把 XML 文件和这个 txt 一起发给 Claude**，然后再做第 5 步。
+5. **按相机的实际配置改卡**（只在第 4 步确认相机是 Deca / 10 Tap / 8 位之后；如果相机报的是别的组合，先发回来，不要照抄下面的值）。顺序固定：
+   1. `card-set ClConfiguration 4`（EightyBit）
+   2. `card-set DeviceTapGeometry 10`（卡 XML 规定 1X10 只在 ClConfiguration=4 时可用，所以先改 4）
+   3. `card-set CameraWidth 16384`
+   4. 「02½」确认三项读回值
+   5. 采一帧：板上 `sg3000-capture capture --output /tmp/sg3000-console/deca16k.pgm --timeout-ms 10000 --control-timeout-ms 2000`
+6. **看输出**：
+   - 成功：`Saved complete Mono8 frame: 16384 x 2000, 32768000 bytes`，经网口回传，看图是否正常（不再只有 7 位在动）。
+   - 失败：现在会多打印 `FailedStage: …`、`StopFailedStage: …`、`LastHeader …` 三行，**原样发回来**，就能知道卡在"开始命令"还是"DMA"还是"停止"。
+7. 恢复：断电即恢复卡的出厂参数（4096 / Base / 3 Tap）。相机这一节全程只读，没有改相机。
 
 ## 6. 采到图之后可以马上做的验证（电脑上，不用板子）
 
@@ -136,4 +165,5 @@ python -I host/detect/candidates.py D:\SG3000_Captures\某张图.pgm --threshold
 4. 盖镜头盖采的 2~3 张图（V3 用）
 5. 如果有：Windows 上 VisionKit 导出的**这台 16K 相机**的 GenICam XML（`cam_regs.h` 现在用的是 8K 型号的地址）
 5½. 16K 宽度实验：改宽度前后两次 `== Card params ==` 全段，以及两张遮半边的图
+5¾. **C2 读到的相机 XML 文件 + C3 的 `camera-regs-*.txt`**；第 5 步失败时的 `FailedStage` / `LastHeader` 几行
 6. **「02¾ 读取采集卡 XML」读到的文件**（`D:\SG3000_Captures\card-xml\` 里；`CameraWidth` 的地址在里面，见 I2 第 5 节）

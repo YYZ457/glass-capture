@@ -48,7 +48,7 @@ apps ─▶ stream ─▶ processing
 
 | 文件 | 职责 | 状态 |
 |---|---|---|
-| `sg3000_rx.c` | PCIe 绑定、BAR 映射、寄存器白名单、DMA、出错隔离 | ✅ 2026-11-14 已编译并通过 12382 符号 ABI 检查；实机 `cam_serial=0` 采图与旧驱动一致，`cam_serial=1` 已打通 port0 `camera-probe`（⚠️ 单路卡测 `--port 1` 会触发 PCIe Slave error，待加拦截）。见 `docs/bringup_report_2026-11-14.md` |
+| `sg3000_rx.c` | PCIe 绑定、BAR 映射、寄存器白名单、DMA、出错隔离 | ✅ 2026-11-14 已编译并通过 12382 符号 ABI 检查；实机 `cam_serial=0` 采图与旧驱动一致，`cam_serial=1` 已打通 port0 `camera-probe`；白名单已去掉端口 1（单路卡碰它会 PCIe Slave error），**需重编 .ko**。见 `docs/bringup_report_2026-11-14.md` |
 | `Kbuild`、`module.sh`、`verify_module.py` | 构建 .ko 并检查目标内核 ABI | ✅ 仅改路径 |
 
 ### board/capture/ — 和卡的固件对话（原 `sg3000_capture_core.c` 拆成 5 份）
@@ -86,6 +86,7 @@ apps ─▶ stream ─▶ processing
 |---|---|---|
 | `cam_regs.h` | 相机寄存器地址 | 🟡 来自同系列 8K 型号 XML，待 16K 确认 |
 | `cam_serial` | 串口邮箱初始化 / 收发 / 波特率 + GenCP 读写 | ✅ 实机 `cam_serial=1` + `port=0, baud=115200` 读出 `JAI / SW-WS2-CL16K-50M-SDE`；单路卡禁碰 port1（见 `docs/bringup_report_2026-11-14.md`） |
+| `cam_xml` | GenCP 清单表 → 从相机本身读 GenICam XML；按块读内存（重试 + 清残留）| 🟡 纯函数有单测；VisionKit 同一流程已逆向确认；待上板 |
 | `cam_config` | 宽度、行频、曝光、触发、测试图案、User Set | 🟡 已写在 cam_serial 之上；地址待 16K XML 核对 |
 
 ### board/transport/
@@ -100,7 +101,7 @@ apps ─▶ stream ─▶ processing
 | 文件 | 程序 | 状态 |
 |---|---|---|
 | `sg_status.c` | `sg_status` 只读体检；`--card-xml DIR` 读卡 XML | ✅ 实机体检与 `--card-xml` 读出均通过 |
-| `sg_capture_main.c` | `sg3000-capture` 单帧；`send` 经网口发图；`card-set` 写卡参数（白名单 + 读回）；`camera-probe` 经串口读相机型号；`version` | ✅ `preflight` / `capture`（4096×2000）/ `version` / `card-set` / `camera-probe`（port0）实机已跑；16384 宽度下 `capture` 约 2s `-110` 超时；`send` 待测 |
+| `sg_capture_main.c` | `sg3000-capture` 单帧；`send` 经网口发图；`card-set` 写卡参数（白名单 + 读回）；`camera-probe` / `camera-xml` / `camera-regs` / `camera-read`（只读）；失败时打印 `FailedStage` / `LastHeader`；`version` | ✅ `preflight` / `capture`（4096×2000）/ `version` / `card-set` / `camera-probe`（port0）实机已跑；16384 宽度下 `capture` 约 2s `-110`（疑 CL 模式不对，见 BRINGUP 5¾）；`camera-xml` 等待测 |
 | `sg_stream_main.c` | `sg3000-stream` 连续；`--processor candidates`、`--tcp` | 🟡 已迁移，合成源跑通；硬件源没上板 |
 | `pgm_write` | 原子写 PGM | 🟡 已写，电脑上测试通过 |
 

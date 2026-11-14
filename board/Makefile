@@ -15,7 +15,7 @@ CAPTURE    = capture/sg_session.c capture/sg_mailbox.c capture/sg_preflight.c \
              capture/sg_block.c capture/sg_acq.c capture/sg_io_linux.c capture/sg_cardxml.c
 PROCESSING = processing/sg_view.c processing/sg_stats.c processing/sg_candidates.c
 STREAM     = stream/sg_pipeline.c stream/sg_linecheck.c
-CAMERA     = camera_ctrl/cam_serial.c camera_ctrl/cam_config.c
+CAMERA     = camera_ctrl/cam_serial.c camera_ctrl/cam_config.c camera_ctrl/cam_xml.c
 TRANSPORT  = transport/tx_jsonl.c transport/tx_tcp.c
 COMMON     = apps/pgm_write.c
 

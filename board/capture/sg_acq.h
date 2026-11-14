@@ -39,6 +39,8 @@ struct sg_capture_result {
     struct sg_capture_frame frame;
     int primary_error, stop_error;
     int start_attempted, stop_attempted;
+    const char *primary_stage;      /* 诊断：primary_error 出在哪一步（成功时为 NULL）*/
+    const char *stop_stage;         /* 诊断：stop_error 出在哪一步 */
 };
 int sg_capture_once(struct sg_capture_session *s, const struct sg_capture_options *o,
                     struct sg_capture_result *r);

@@ -32,12 +32,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "sg_io_linux.h"
 #include "sg_acq.h"
 #include "pgm_write.h"
 #include "tx_tcp.h"
 #include "cam_serial.h"
+#include "cam_xml.h"
 #include "sg_mailbox.h"
 #include "sg3000_regs.h"
 #include "sg_err.h"
@@ -57,9 +59,13 @@ static void interrupt_handler(int number)
 static void usage(void)
 {
     puts("Usage: sg3000-capture preflight [--device PATH]\n"
-         "       sg3000-capture capture --output PATH [--device PATH] [--timeout-ms 1..60000] [--send IP[:PORT]]\n"
+         "       sg3000-capture capture --output PATH [--device PATH] [--timeout-ms 1..60000] [--control-timeout-ms 1..2000] [--send IP[:PORT]]\n"
          "       sg3000-capture send FILE.pgm --to IP[:PORT]\n"
          "       sg3000-capture camera-probe [--device PATH] [--port 0|1] [--baud N]\n"
+         "       sg3000-capture camera-xml OUTDIR [--entry N] [--device PATH] [--port 0|1] [--baud N]\n"
+         "       sg3000-capture camera-read ADDR [LEN] [--device PATH] [--port 0|1] [--baud N]\n"
+         "       sg3000-capture camera-regs NAME@ADDR:LEN ... [--device PATH] [--port 0|1] [--baud N]\n"
+         "         camera commands are read-only, need insmod sg3000_rx.ko cam_serial=1, default baud 115200\n"
          "       sg3000-capture card-set NAME VALUE [--device PATH]\n"
          "         NAME: CameraWidth CameraHeight DeviceTapGeometry ClConfiguration CameraScanType\n"
          "       sg3000-capture version\n"
@@ -136,54 +142,408 @@ static int send_main(int argc, char **argv)
     return ret ? 1 : 0;
 }
 
-/* GenCP 标准的设备信息寄存器（Technology Agnostic Bootstrap Register Map，[GenCP 标准]，待相机实测）。 */
-#define GENCP_MANUFACTURER_NAME 0x0004u
-#define GENCP_MODEL_NAME        0x0044u
-#define GENCP_STRING_LEN        64u
+/* ==== 相机命令（GenCP over Camera Link 串口，docs/interfaces/I7）==================
+ * 都需要新驱动且 insmod 时带 cam_serial=1（旧驱动会报 Invalid argument (-22)）。
+ * 全部只读：只发 GenCP ReadMem，不写相机。 */
+
+#define CAMERA_DEFAULT_BAUD 115200ul   /* 2026-11-14 实板：115200 读通；9600 超时，其余 -71 */
+#define CAMERA_TIMEOUT_MS   1000u
+#define CAMERA_RETRIES      3u
+
+struct camera_ctx {
+    struct sg_linux_dev dev;
+    struct sg_capture_session session;
+    struct sg_capture_io io;
+    struct cam_serial ser;
+    int opened;
+};
+
+/* 解析 --device / --port / --baud。认识就吃掉参数返回 1，不认识返回 0，值不对返回 -1。 */
+static int camera_common_arg(int argc, char **argv, int *i, const char **device,
+                             unsigned *port, unsigned long *baud)
+{
+    char *end;
+
+    if (*i + 1 >= argc) return 0;
+    if (!strcmp(argv[*i], "--device")) { *device = argv[++*i]; return 1; }
+    if (!strcmp(argv[*i], "--port")) {
+        unsigned long v = strtoul(argv[++*i], &end, 10);
+        if (*end || v > 1) return -1;
+        *port = (unsigned)v;
+        return 1;
+    }
+    if (!strcmp(argv[*i], "--baud")) {
+        *baud = strtoul(argv[++*i], &end, 10);
+        return *end ? -1 : 1;
+    }
+    return 0;
+}
+
+static void camera_close(struct camera_ctx *x)
+{
+    if (x->opened) sg_linux_close(&x->dev);
+    x->opened = 0;
+}
+
+/* 打开设备、（port 1 时）确认是双路卡、打开串口、设波特率。 */
+static int camera_open(struct camera_ctx *x, const char *device, unsigned port, unsigned long baud)
+{
+    uint32_t channels;
+    int ret;
+
+    memset(x, 0, sizeof *x);
+    ret = sg_linux_open(&x->dev, device, &interrupted);
+    if (ret) return ret;
+    x->opened = 1;
+    sg_linux_io(&x->dev, &x->io);
+    ret = sg_capture_session_init(&x->session, &x->io);
+    if (ret) return ret;
+    if (port != 0) {
+        /* 2026-11-14 实板：单路卡上碰 port 1 的寄存器 → nwl-pcie Slave error，整板要重启。
+         * 先问卡有几路（VisionKit 同样读这个：低字节 '1' = 2 路）。 */
+        ret = sg_mbx_read(&x->session, SG_L_CAMERA_ENUM, &channels, CAMERA_TIMEOUT_MS, 0);
+        if (ret) return ret;
+        if ((channels & 0xffu) != 0x31u) {
+            fprintf(stderr, "Refused: --port 1 needs a 2-channel card, but camera enum = 0x%08x "
+                    "(1 channel). Port 1 registers do not exist and touching them crashes the PCIe bus.\n",
+                    channels);
+            return -ENODEV;
+        }
+    }
+    ret = cam_serial_open(&x->ser, &x->session, port);
+    if (!ret) ret = cam_serial_set_baud(&x->ser, (uint32_t)baud);
+    return ret;
+}
 
 static void print_gencp_string(const char *label, const unsigned char *b)
 {
     unsigned i;
 
     printf("%s=", label);
-    for (i = 0; i < GENCP_STRING_LEN && b[i]; ++i) putchar(b[i] >= 0x20 && b[i] < 0x7f ? b[i] : '?');
+    for (i = 0; i < CAM_BRM_STRING_LEN && b[i]; ++i) putchar(b[i] >= 0x20 && b[i] < 0x7f ? b[i] : '?');
     putchar('\n');
 }
 
-/* sg3000-capture camera-probe：初始化 Camera Link 串口、设波特率、用 GenCP 读相机厂商和型号。
- * 需要新驱动且 insmod 时带 cam_serial=1（旧驱动会报 Invalid argument (-22)）。 */
-static int camera_main(int argc, char **argv)
+/* 把相机字符串变成能当文件名的样子：只留字母数字和 - _ . */
+static void safe_name(const unsigned char *b, char *out, size_t cap)
+{
+    size_t i, n = 0;
+
+    for (i = 0; i < CAM_BRM_STRING_LEN && b[i] && n + 1 < cap; ++i) {
+        unsigned char ch = b[i];
+        out[n++] = (char)((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'z') ||
+                          (ch >= 'A' && ch <= 'Z') || ch == '-' || ch == '.' ? ch : '_');
+    }
+    if (n == 0 && cap > 6) { memcpy(out, "camera", 6); n = 6; }
+    out[n] = 0;
+}
+
+static int install_interrupt(void)
+{
+    struct sigaction action;
+
+    memset(&action, 0, sizeof action);
+    action.sa_handler = interrupt_handler;
+    sigemptyset(&action.sa_mask);
+    return sigaction(SIGINT, &action, NULL) || sigaction(SIGTERM, &action, NULL) ? -errno : 0;
+}
+
+static void print_manifest(const struct cam_manifest_entry *e, unsigned i)
+{
+    unsigned k;
+
+    printf("CameraManifest[%u] file=%u.%u.%u type=%s addr=0x%llx size=%llu sha1=", i,
+           e->file_version >> 24, (e->file_version >> 16) & 0xffu, e->file_version & 0xffffu,
+           cam_manifest_ext(e) + 1, (unsigned long long)e->address, (unsigned long long)e->size);
+    if (cam_manifest_has_sha1(e)) for (k = 0; k < sizeof e->sha1; ++k) printf("%02x", e->sha1[k]);
+    else printf("none");
+    putchar('\n');
+}
+
+/* sg3000-capture camera-probe：读 GenCP 标准设备信息（BRM）和 XML 清单表，只读。 */
+static int camera_probe_main(int argc, char **argv)
+{
+    static const struct { const char *label; uint32_t addr; } strings[] = {
+        { "CameraManufacturer", CAM_BRM_MANUFACTURER }, { "CameraModel", CAM_BRM_MODEL },
+        { "CameraFamily", CAM_BRM_FAMILY }, { "CameraDeviceVersion", CAM_BRM_DEVICE_VERSION },
+        { "CameraManufacturerInfo", CAM_BRM_MANUFACTURER_INFO }, { "CameraSerialNumber", CAM_BRM_SERIAL },
+        { "CameraUserName", CAM_BRM_USER_NAME },
+    };
+    const char *device = SG_DEFAULT_DEVICE;
+    unsigned port = 0, i, count = 0;
+    unsigned long baud = CAMERA_DEFAULT_BAUD;
+    unsigned char b[CAM_BRM_STRING_LEN];
+    struct cam_manifest_entry entries[CAM_MANIFEST_MAX_ENTRIES];
+    static struct camera_ctx x;
+    uint64_t table = 0;
+    int a, ret;
+
+    for (a = 2; a < argc; ++a) {
+        int r = camera_common_arg(argc, argv, &a, &device, &port, &baud);
+        if (r <= 0) { usage(); return 2; }
+    }
+    ret = camera_open(&x, device, port, baud);
+    if (!ret) {
+        printf("CameraProbe port=%u baud=%lu\n", port, baud);
+        for (i = 0; !ret && i < sizeof strings / sizeof strings[0]; ++i) {
+            int r = cam_read_mem(&x.ser, strings[i].addr, b, sizeof b, CAMERA_TIMEOUT_MS, CAMERA_RETRIES, NULL, NULL);
+            if (!r) print_gencp_string(strings[i].label, b);
+            else if (i < 2) ret = r;        /* 厂商和型号必须读得出；其余只是参考 */
+            else printf("%s unreadable: %s (%d)\n", strings[i].label, strerror(-r), r);
+        }
+    }
+    if (!ret) ret = cam_read_mem(&x.ser, CAM_BRM_GENCP_VERSION, b, 4, CAMERA_TIMEOUT_MS, CAMERA_RETRIES, NULL, NULL);
+    if (!ret) printf("CameraGenCPVersion=%u.%u\n", (unsigned)(b[0] << 8 | b[1]), (unsigned)(b[2] << 8 | b[3]));
+    if (!ret) ret = cam_read_mem(&x.ser, CAM_BRM_CAPABILITY, b, 16, CAMERA_TIMEOUT_MS, CAMERA_RETRIES, NULL, NULL);
+    if (!ret) printf("CameraCapability=0x%016llx MaxResponseMs=%u\n", (unsigned long long)cam_be64(b),
+                     (unsigned)((uint32_t)b[8] << 24 | (uint32_t)b[9] << 16 | (uint32_t)b[10] << 8 | b[11]));
+    if (!ret) ret = cam_read_mem(&x.ser, CAM_BRM_SBRM_ADDRESS, b, 8, CAMERA_TIMEOUT_MS, CAMERA_RETRIES, NULL, NULL);
+    if (!ret) printf("CameraSBRMAddress=0x%llx\n", (unsigned long long)cam_be64(b));
+    if (!ret) ret = cam_manifest_read(&x.ser, &table, entries, CAM_MANIFEST_MAX_ENTRIES, &count, CAMERA_TIMEOUT_MS);
+    if (!ret) {
+        printf("CameraManifestTable=0x%llx entries=%u\n", (unsigned long long)table, count);
+        for (i = 0; i < count && i < CAM_MANIFEST_MAX_ENTRIES; ++i) print_manifest(&entries[i], i);
+    }
+    camera_close(&x);
+    if (ret) fprintf(stderr, "Failed: %s (%d)\n", strerror(-ret), ret);
+    return ret ? 1 : 0;
+}
+
+struct xml_progress { uint64_t next; };
+
+static void xml_progress(uint64_t done, uint64_t total, void *ctx)
+{
+    struct xml_progress *p = ctx;
+
+    if (done >= p->next || done == total) {
+        printf("CameraXML progress %llu/%llu\n", (unsigned long long)done, (unsigned long long)total);
+        fflush(stdout);
+        p->next = done + 16384u;
+    }
+}
+
+/* sg3000-capture camera-xml OUTDIR：从相机读出它自己的 GenICam XML（.zip 或 .xml），只读。 */
+static int camera_xml_main(int argc, char **argv)
+{
+    const char *device = SG_DEFAULT_DEVICE, *dir = NULL;
+    unsigned port = 0, entry = 0, count = 0, k;
+    unsigned long baud = CAMERA_DEFAULT_BAUD;
+    unsigned char model[CAM_BRM_STRING_LEN];
+    struct cam_manifest_entry entries[CAM_MANIFEST_MAX_ENTRIES], *e;
+    struct xml_progress progress = { 0 };
+    static struct camera_ctx x;
+    char name[CAM_BRM_STRING_LEN + 1], path[4096], tmp[4200];
+    unsigned char *data = NULL;
+    uint64_t table = 0, t0;
+    FILE *f;
+    int a, ret;
+
+    for (a = 2; a < argc; ++a) {
+        int r = camera_common_arg(argc, argv, &a, &device, &port, &baud);
+        char *end;
+        if (r < 0) { usage(); return 2; }
+        if (r) continue;
+        if (!strcmp(argv[a], "--entry") && a + 1 < argc) {
+            unsigned long v = strtoul(argv[++a], &end, 10);
+            if (*end || v >= CAM_MANIFEST_MAX_ENTRIES) { usage(); return 2; }
+            entry = (unsigned)v;
+        } else if (!dir && argv[a][0] != '-') dir = argv[a];
+        else { usage(); return 2; }
+    }
+    if (!dir) { usage(); return 2; }
+    if ((ret = install_interrupt())) goto out;
+
+    ret = camera_open(&x, device, port, baud);
+    if (!ret) ret = cam_read_mem(&x.ser, CAM_BRM_MODEL, model, sizeof model, CAMERA_TIMEOUT_MS, CAMERA_RETRIES, NULL, NULL);
+    if (!ret) ret = cam_manifest_read(&x.ser, &table, entries, CAM_MANIFEST_MAX_ENTRIES, &count, CAMERA_TIMEOUT_MS);
+    if (ret) goto out;
+    printf("CameraManifestTable=0x%llx entries=%u\n", (unsigned long long)table, count);
+    for (k = 0; k < count && k < CAM_MANIFEST_MAX_ENTRIES; ++k) print_manifest(&entries[k], k);
+    if (entry >= count) {
+        fprintf(stderr, "CameraXML FAILED: --entry %u but the camera lists %u entries\n", entry, count);
+        ret = -EINVAL;
+        goto out;
+    }
+    e = &entries[entry];
+    safe_name(model, name, sizeof name);
+    snprintf(path, sizeof path, "%s/%s_%u.%u.%u%s", dir, name, e->file_version >> 24,
+             (e->file_version >> 16) & 0xffu, e->file_version & 0xffffu, cam_manifest_ext(e));
+    snprintf(tmp, sizeof tmp, "%s.part", path);
+
+    data = malloc((size_t)e->size);
+    if (!data) { ret = -ENOMEM; goto out; }
+    printf("CameraXML reading entry %u: %llu bytes at 0x%llx (about %llu s at %lu baud)\n", entry,
+           (unsigned long long)e->size, (unsigned long long)e->address,
+           (unsigned long long)(e->size * 13u / (baud / 10u) + 1u), baud);
+    fflush(stdout);
+    t0 = x.io.now_ms(x.io.context);
+    ret = cam_read_mem(&x.ser, e->address, data, e->size, CAMERA_TIMEOUT_MS, CAMERA_RETRIES, xml_progress, &progress);
+    if (ret) goto out;
+
+    f = fopen(tmp, "wb");
+    if (!f) { ret = -errno; goto out; }
+    if (fwrite(data, 1, (size_t)e->size, f) != (size_t)e->size) ret = -EIO;
+    if (fclose(f) && !ret) ret = -EIO;
+    if (!ret && rename(tmp, path)) ret = -errno;
+    if (ret) { unlink(tmp); goto out; }
+
+    printf("CameraXML saved: %s (%llu bytes, %llu s)\n", path, (unsigned long long)e->size,
+           (unsigned long long)((x.io.now_ms(x.io.context) - t0) / 1000u));
+    if (cam_manifest_has_sha1(e)) {
+        printf("CameraXML SHA1 expected ");
+        for (k = 0; k < sizeof e->sha1; ++k) printf("%02x", e->sha1[k]);
+        putchar('\n');
+    }
+    if (!strcmp(cam_manifest_ext(e), ".zip") ? memcmp(data, "PK", 2) : (data[0] != '<' && data[0] != 0xef))
+        printf("CameraXML WARNING: content does not look like a %s file (first bytes %02x %02x)\n",
+               cam_manifest_ext(e) + 1, data[0], e->size > 1 ? data[1] : 0);
+out:
+    free(data);
+    camera_close(&x);
+    if (ret) fprintf(stderr, "CameraXML FAILED: %s (%d)\n", strerror(-ret), ret);
+    return ret ? 1 : 0;
+}
+
+static int parse_u64(const char *text, uint64_t *out)
+{
+    char *end;
+    unsigned long long v;
+
+    errno = 0;
+    v = strtoull(text, &end, 0);
+    if (errno || end == text || *end) return -1;
+    *out = v;
+    return 0;
+}
+
+static void hexdump(const unsigned char *b, uint32_t n, uint64_t base)
+{
+    uint32_t i, j;
+
+    for (i = 0; i < n; i += 16) {
+        printf("  %08llx ", (unsigned long long)(base + i));
+        for (j = i; j < i + 16; ++j) j < n ? printf(" %02x", b[j]) : printf("   ");
+        printf("  ");
+        for (j = i; j < i + 16 && j < n; ++j) putchar(b[j] >= 0x20 && b[j] < 0x7f ? b[j] : '.');
+        putchar('\n');
+    }
+}
+
+/* 大端整数（1/2/4/8 字节）。 */
+static uint64_t be_value(const unsigned char *b, uint32_t n)
+{
+    uint64_t v = 0;
+    uint32_t i;
+
+    for (i = 0; i < n; ++i) v = v << 8 | b[i];
+    return v;
+}
+
+/* sg3000-capture camera-read ADDR [LEN]：读相机任意地址，十六进制打印。只读。 */
+static int camera_read_main(int argc, char **argv)
 {
     const char *device = SG_DEFAULT_DEVICE;
     unsigned port = 0;
-    unsigned long baud = 9600;
-    unsigned char name[GENCP_STRING_LEN];
-    struct sg_capture_session session;
-    struct sg_capture_io io;
-    struct sg_linux_dev dev;
-    static struct cam_serial ser;
-    int i, ret;
+    unsigned long baud = CAMERA_DEFAULT_BAUD;
+    uint64_t addr = 0, len = 4;
+    unsigned char b[4096];
+    static struct camera_ctx x;
+    int a, have_addr = 0, have_len = 0, ret;
 
-    for (i = 2; i < argc; ++i) {
-        if (!strcmp(argv[i], "--device") && i + 1 < argc) device = argv[++i];
-        else if (!strcmp(argv[i], "--port") && i + 1 < argc) port = (unsigned)strtoul(argv[++i], NULL, 10);
-        else if (!strcmp(argv[i], "--baud") && i + 1 < argc) baud = strtoul(argv[++i], NULL, 10);
+    for (a = 2; a < argc; ++a) {
+        int r = camera_common_arg(argc, argv, &a, &device, &port, &baud);
+        if (r < 0) { usage(); return 2; }
+        if (r) continue;
+        if (!have_addr && !parse_u64(argv[a], &addr)) have_addr = 1;
+        else if (have_addr && !have_len && !parse_u64(argv[a], &len)) have_len = 1;
         else { usage(); return 2; }
     }
-    ret = sg_linux_open(&dev, device, &interrupted);
-    if (ret) goto out;
-    sg_linux_io(&dev, &io);
-    if (!(ret = sg_capture_session_init(&session, &io)) &&
-        !(ret = cam_serial_open(&ser, &session, port)) &&
-        !(ret = cam_serial_set_baud(&ser, (uint32_t)baud))) {
-        printf("CameraProbe port=%u baud=%lu\n", port, baud);
-        ret = cam_gencp_read(&ser, GENCP_MANUFACTURER_NAME, name, sizeof name, 1000);
-        if (!ret) print_gencp_string("CameraManufacturer", name);
-        if (!ret) ret = cam_gencp_read(&ser, GENCP_MODEL_NAME, name, sizeof name, 1000);
-        if (!ret) print_gencp_string("CameraModel", name);
+    if (!have_addr || len == 0 || len > sizeof b) { usage(); return 2; }
+    if ((ret = install_interrupt())) goto out;
+    ret = camera_open(&x, device, port, baud);
+    if (!ret) ret = cam_read_mem(&x.ser, addr, b, len, CAMERA_TIMEOUT_MS, CAMERA_RETRIES, NULL, NULL);
+    if (!ret) {
+        printf("CameraRead 0x%llx %llu bytes", (unsigned long long)addr, (unsigned long long)len);
+        if (len == 1 || len == 2 || len == 4 || len == 8)
+            printf(" = 0x%llx (%llu) big-endian", (unsigned long long)be_value(b, (uint32_t)len),
+                   (unsigned long long)be_value(b, (uint32_t)len));
+        putchar('\n');
+        hexdump(b, (uint32_t)len, addr);
     }
-    sg_linux_close(&dev);
 out:
+    camera_close(&x);
+    if (ret) fprintf(stderr, "Failed: %s (%d)\n", strerror(-ret), ret);
+    return ret ? 1 : 0;
+}
+
+/* sg3000-capture camera-regs NAME@ADDR:LEN ...：按清单读一串相机寄存器（清单由
+ * tools/genicam_regs.py 从相机 XML 生成）。某一项失败只记下来，继续读下一项。只读。 */
+static int camera_regs_main(int argc, char **argv)
+{
+    const char *device = SG_DEFAULT_DEVICE;
+    unsigned port = 0, failed = 0, total = 0;
+    unsigned long baud = CAMERA_DEFAULT_BAUD;
+    static struct camera_ctx x;
+    int a, ret;
+
+    /* 先把清单全部检查一遍，格式不对就什么都不碰。 */
+    for (a = 2; a < argc; ++a) {
+        int r = camera_common_arg(argc, argv, &a, &device, &port, &baud);
+        const char *at = strchr(argv[a], '@'), *colon = at ? strchr(at, ':') : NULL;
+        char *end;
+        unsigned long long v;
+        if (r < 0) { usage(); return 2; }
+        if (r) continue;
+        if (!at || !colon || at == argv[a] || at - argv[a] > 63) { usage(); return 2; }
+        errno = 0;
+        v = strtoull(at + 1, &end, 0);
+        if (errno || end != colon) { usage(); return 2; }
+        v = strtoull(colon + 1, &end, 10);
+        if (errno || *end || v == 0 || v > 256) { usage(); return 2; }
+        total++;
+    }
+    if (!total) { usage(); return 2; }
+    if ((ret = install_interrupt())) goto out;
+    ret = camera_open(&x, device, port, baud);
+    if (ret) goto out;
+    printf("CameraRegs port=%u baud=%lu count=%u\n", port, baud, total);
+    for (a = 2; a < argc; ++a) {
+        const char *at, *colon;
+        char name[64];
+        unsigned char b[256];
+        uint64_t addr;
+        uint32_t len;
+        int r;
+
+        if (!strcmp(argv[a], "--device") || !strcmp(argv[a], "--port") || !strcmp(argv[a], "--baud")) { ++a; continue; }
+        at = strchr(argv[a], '@');
+        colon = strchr(at, ':');
+        memcpy(name, argv[a], (size_t)(at - argv[a]));
+        name[at - argv[a]] = 0;
+        addr = strtoull(at + 1, NULL, 0);
+        len = (uint32_t)strtoul(colon + 1, NULL, 10);
+        r = cam_read_mem(&x.ser, addr, b, len, CAMERA_TIMEOUT_MS, CAMERA_RETRIES, NULL, NULL);
+        if (r == -ECANCELED) { ret = r; break; }
+        if (r) {
+            printf("CameraReg %s 0x%llx ERROR %s (%d)\n", name, (unsigned long long)addr, strerror(-r), r);
+            failed++;
+        } else if (len == 1 || len == 2 || len == 4 || len == 8) {
+            printf("CameraReg %s 0x%llx = 0x%llx (%llu)\n", name, (unsigned long long)addr,
+                   (unsigned long long)be_value(b, len), (unsigned long long)be_value(b, len));
+        } else {
+            uint32_t k;
+            printf("CameraReg %s 0x%llx = \"", name, (unsigned long long)addr);
+            for (k = 0; k < len && b[k]; ++k) putchar(b[k] >= 0x20 && b[k] < 0x7f && b[k] != '"' ? b[k] : '?');
+            printf("\" hex ");
+            for (k = 0; k < len; ++k) printf("%02x", b[k]);
+            putchar('\n');
+        }
+        fflush(stdout);
+    }
+    printf("CameraRegs done: %u ok, %u failed\n", total - failed, failed);
+    if (!ret && failed) ret = -EIO;
+out:
+    camera_close(&x);
     if (ret) fprintf(stderr, "Failed: %s (%d)\n", strerror(-ret), ret);
     return ret ? 1 : 0;
 }
@@ -294,7 +654,16 @@ int main(int argc, char **argv)
         return send_main(argc, argv);
     }
     if (!strcmp(argv[1], "camera-probe")) {
-        return camera_main(argc, argv);
+        return camera_probe_main(argc, argv);
+    }
+    if (!strcmp(argv[1], "camera-xml")) {
+        return camera_xml_main(argc, argv);
+    }
+    if (!strcmp(argv[1], "camera-read")) {
+        return camera_read_main(argc, argv);
+    }
+    if (!strcmp(argv[1], "camera-regs")) {
+        return camera_regs_main(argc, argv);
     }
     if (!strcmp(argv[1], "card-set")) {
         return card_set_main(argc, argv);
@@ -313,6 +682,12 @@ int main(int argc, char **argv)
             send_to = argv[++i];
         } else if (!strcmp(argv[i], "--timeout-ms") && i + 1 < argc && capture) {
             if (parse_timeout(argv[++i], &options.frame_timeout_ms)) {
+                usage();
+                return 2;
+            }
+        } else if (!strcmp(argv[i], "--control-timeout-ms") && i + 1 < argc && capture) {
+            /* 诊断用：邮箱命令（开始/停止）的超时，默认 1000，上限 2000 */
+            if (parse_timeout(argv[++i], &options.control_timeout_ms) || options.control_timeout_ms > 2000) {
                 usage();
                 return 2;
             }
@@ -376,6 +751,22 @@ int main(int argc, char **argv)
         if (result.stop_error) {
             fprintf(stderr, "AcquisitionStop cleanup failed: %s (%d)\n",
                     strerror(-result.stop_error), result.stop_error);
+        }
+        /* 诊断：失败卡在哪一步、最近一个块头（2026-11-14 16K 宽度 -110 就靠这几行定位）*/
+        if (result.primary_error && result.primary_stage) {
+            fprintf(stderr, "FailedStage: %s\n", result.primary_stage);
+        }
+        if (result.stop_error && result.stop_stage) {
+            fprintf(stderr, "StopFailedStage: %s\n", result.stop_stage);
+        }
+        if ((result.primary_error || result.stop_error) && session.last_hdr.valid) {
+            fprintf(stderr, "LastHeader block=%u seq=0x%08x width=%u lines=%u max_lines=%u "
+                    "payload=%u dest_offset=%u src=0x%08x\n",
+                    session.last_hdr.block_id, session.last_hdr.seq, session.last_hdr.width,
+                    session.last_hdr.lines, session.last_hdr.max_lines, session.last_hdr.payload_len,
+                    session.last_hdr.dest_offset, session.last_hdr.src_addr);
+        } else if (result.primary_error || result.stop_error) {
+            fprintf(stderr, "LastHeader none (no block header was read)\n");
         }
         if (!ret) {
             ret = pgm_write(output, &result.frame);

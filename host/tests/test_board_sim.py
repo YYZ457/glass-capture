@@ -205,3 +205,77 @@ def test_card_set(board):
     fake.write_text("#!/bin/bash\necho 'Refused: acquisition is not stopped (SG_ACQ_STATE 0x00000000)' >&2\nexit 1\n")
     job = run(console, "card_set", {"name": "CameraWidth", "value": 16384})
     assert job["status"] == "error" and "not stopped" in job["message"]
+
+
+CAMERA_XML = b"""<?xml version="1.0"?>
+<RegisterDescription xmlns="http://www.genicam.org/GenApi/Version_1_1" ModelName="Test" VendorName="T">
+  <Integer Name="Width"><pValue>WidthReg</pValue></Integer>
+  <IntReg Name="WidthReg"><Address>0x1000</Address><Length>4</Length><AccessMode>RW</AccessMode>
+    <pPort>Device</pPort><Endianess>BigEndian</Endianess></IntReg>
+  <Enumeration Name="ClConfiguration"><EnumEntry Name="Base"><Value>0</Value></EnumEntry>
+    <EnumEntry Name="Deca"><Value>4</Value></EnumEntry><pValue>ClConfigReg</pValue></Enumeration>
+  <MaskedIntReg Name="ClConfigReg"><Address>0x2000</Address><Length>4</Length><AccessMode>RW</AccessMode>
+    <pPort>Device</pPort><LSB>3</LSB><MSB>0</MSB><Endianess>BigEndian</Endianess></MaskedIntReg>
+  <Integer Name="ExposureTime"><pValue>ExpCalc</pValue></Integer>
+  <IntSwissKnife Name="ExpCalc"><pVariable Name="R">WidthReg</pVariable><Formula>R*2</Formula></IntSwissKnife>
+</RegisterDescription>
+"""
+
+
+def test_camera_xml_and_regs(board):
+    """相机 XML：驱动是 cam_serial=N 时先重载；SHA1 不符要报错；取回后按 XML 读寄存器并翻译成名字。"""
+    import hashlib
+    import io
+    import zipfile
+    console, tmp = board
+    import transport as T
+    param = tmp / "cam_serial"
+    T.CAM_SERIAL_PARAM = str(param)
+    T.CAMERA_XML_DIR = str(tmp / "board" / "camera-xml")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Test.xml", CAMERA_XML)
+    blob = buf.getvalue()
+    (tmp / "cam.zip").write_bytes(blob)
+    sha = hashlib.sha1(blob).hexdigest()
+    fake = tmp / "board" / "sg3000-capture"
+
+    # 1. 旧驱动：没有参数文件 → 明确报错，不去 insmod
+    fake.write_text("#!/bin/bash\nexit 9\n")
+    fake.chmod(0o755)
+    job = run(console, "camera_xml")
+    assert job["status"] == "error" and "旧驱动" in job["message"], job
+
+    # 2. 参数是 N：rmmod + insmod cam_serial=1 后变 Y；SHA1 一致 → 取回
+    param.write_text("N\n")
+    shimx = tmp / "shimx"
+    shimx.mkdir()
+    (shimx / "rmmod").write_text("#!/bin/sh\nexit 0\n")
+    (shimx / "insmod").write_text(f"#!/bin/sh\n[ \"$2\" = cam_serial=1 ] || exit 5\ntouch \"$SIM_DEVNODE\"\necho Y > '{param}'\n")
+    for f in shimx.iterdir():
+        f.chmod(0o755)
+    console.port.env["PATH"] = f"{shimx}:{console.port.env['PATH']}"
+    fake.write_text("#!/bin/bash\ncase \"$1\" in\n"
+                    f"camera-xml) cp '{tmp / 'cam.zip'}' \"$2/Test_1.0.0.zip\"\n"
+                    "  echo 'CameraManifest[0] file=1.0.0 type=zip addr=0x100000 size=%d sha1=%s'\n"
+                    "  echo \"CameraXML saved: $2/Test_1.0.0.zip (%d bytes, 3 s)\"\n"
+                    "  echo 'CameraXML SHA1 expected %s';;\n"
+                    "camera-regs) echo 'CameraRegs port=0 baud=115200 count=2'\n"
+                    "  for a in \"${@:2}\"; do case $a in WidthReg@0x1000:4) echo 'CameraReg WidthReg 0x1000 = 0x4000 (16384)';;\n"
+                    "  ClConfigReg@0x2000:4) echo 'CameraReg ClConfigReg 0x2000 = 0x40000000 (1073741824)';; *) exit 7;; esac; done\n"
+                    "  echo 'CameraRegs done: 2 ok, 0 failed';;\n"
+                    "*) exit 9;; esac\n" % (len(blob), sha, len(blob), sha))
+    job = run(console, "camera_xml")
+    assert job["status"] == "success" and "SHA1 与相机一致" in job["message"], job
+    assert param.read_text().strip() == "Y"
+    assert (tmp / "captures" / "camera-xml" / "Test_1.0.0.zip").read_bytes() == blob
+
+    # 3. 读寄存器：Width = 16384，ClConfiguration：大端编号 LSB=3/MSB=0 是最高 4 位 = 4 = Deca；算出来的 ExposureTime 不读
+    job = run(console, "camera_regs")
+    assert job["status"] == "success", job
+    assert "Width=16384" in job["message"] and "Deca" in job["message"], job
+
+    # 4. SHA1 不符 → 报错
+    fake.write_text(fake.read_text().replace(sha, "0" * 39 + "1"))
+    job = run(console, "camera_xml")
+    assert job["status"] == "error" and "SHA1" in job["message"], job

@@ -5,15 +5,29 @@
 ## 1. 整条链路和状态
 
 ```
-cam_config（宽度、行频、曝光……）      地址表 cam_regs.h [参考8K]          🟡
-   │ cam_gencp_read32 / write32           GenCP 包 + 反码校验和 [逆向]          🟡 纯函数有测试
-   │ cam_serial_send / recv               串口邮箱 0x4110xx / 0x4130xx [逆向]   🟡 有测试
-   │ cam_serial_open / set_baud           初始化 + UART16550 分频（BAR0）[逆向]  🟡
-   │ 驱动 sg3000_rx.ko                    白名单已写，默认关；新 .ko 未编译       ⬜
+cam_config（宽度、行频、曝光……）      地址表 cam_regs.h [参考8K]          🟡 等相机 XML 核对
+   │ cam_xml：清单表 → 读相机 XML        GenCP 标准引导 [逆向+标准]           🟡 纯函数有测试，待上板
+   │ cam_gencp_read32 / write32           GenCP 包 + 反码校验和 [逆向]          ✅ 实板读出 JAI / 型号
+   │ cam_serial_send / recv               串口邮箱 0x4110xx [逆向]              ✅ 实板
+   │ cam_serial_open / set_baud           初始化 + UART16550 分频（BAR0）[逆向]  ✅ 实板，115200
+   │ 驱动 sg3000_rx.ko cam_serial=1       白名单只放开端口 0                     ✅ 实板（端口 1 已去掉，需重编 .ko）
 采集卡 FPGA 里的 UART16550 → Camera Link 串口线 → 相机
 ```
 
-板上试验命令：`sg3000-capture camera-probe [--port 0] [--baud 9600]`。它会读 GenCP 标准设备信息里的厂商名（0x0004）和型号（0x0044），并打印 `CameraManufacturer=` 和 `CameraModel=` 两行。
+板上命令（全部只读，只发 GenCP ReadMem；都要 `insmod sg3000_rx.ko cam_serial=1`；默认 `--port 0 --baud 115200`）：
+
+| 命令 | 作用 | 中控台按钮 |
+|---|---|---|
+| `sg3000-capture camera-probe` | 厂商、型号、版本、序列号、GenCP 版本、XML 清单表 | C1 相机信息 |
+| `sg3000-capture camera-xml DIR` | 按清单表从相机读出它自己的 GenICam XML（.zip/.xml），打印 SHA1 | C2 读取相机 XML |
+| `sg3000-capture camera-regs NAME@ADDR:LEN ...` | 按清单读一串寄存器 | C3 读相机寄存器 |
+| `sg3000-capture camera-read ADDR [LEN]` | 读任意地址，十六进制打印 | — |
+
+C3 的清单由电脑上的 `host/console/genicam.py` 从相机 XML 生成，读回的值也由它翻译成名字和枚举（`python host/console/genicam.py 相机.zip --decode 板上输出.txt`）。
+
+**端口 1**：2026-11-14 实板上单路卡（camera enum `0x30424630`）跑 `--port 1` 触发 `nwl-pcie Slave error`，整板要重启。现在两道防线：
+1. 用户态：`--port 1` 先读 camera enum，低字节不是 `'1'`（双路）就拒绝，不碰任何端口 1 寄存器。
+2. 驱动：白名单删掉了端口 1（`0x4130xx`、`0x110xx`）。**这一条要重编 `.ko` 才生效**；重编前靠第 1 条。
 
 ## 2. 串口邮箱 [逆向]
 
@@ -87,15 +101,15 @@ UART 是标准 16550，即 Xilinx AXI UART16550 IP，位置在 **BAR0 的 `(端�
 - **默认关闭。** 新 `.ko` 不带参数加载时，行为和旧驱动完全一样。
 - 加载时写 `insmod sg3000_rx.ko cam_serial=1`，才放开下表这些地址：
 
-| 方向 | 地址（端口 0；端口 1 = +0x2000）| 允许的值 |
+| 方向 | 地址（只有端口 0；端口 1 已删，见第 1 节）| 允许的值 |
 |---|---|---|
 | 写 | 0x411004 | 只能 0x04000000 |
 | 写 | 0x411008、0x411018、0x411028 | 只能 0xa5 |
 | 写 | 0x411010 | 任意 |
 | 写 | 0x411014 | 17..528 |
 | 读 | 0x411004、0x41101c、0x411020、0x411024 | — |
-| 写 | BAR0 0x1000、0x1004、0x100c（端口 1：0x11000…）| ≤ 0xff |
-| 读 | BAR0 0x100c（端口 1：0x1100c）| — |
+| 写 | BAR0 0x1000、0x1004、0x100c| ≤ 0xff |
+| 读 | BAR0 0x100c| — |
 
 白名单逻辑由 `board/tests/driver_whitelist_test.c` 在电脑上编译测试（`make -C board test`）。
 `.ko` 本身要用板子的内核树编译（`board/driver/module.sh`），仓库里没有内核树，这一步还没做。
@@ -111,7 +125,7 @@ UART 是标准 16550，即 Xilinx AXI UART16550 IP，位置在 **BAR0 的 `(端�
 
 ## 7. 短期替代（不写代码）
 
-在 Windows 上用 VisionKit 把相机设好：宽度 16384、行频、曝光、`ClConfiguration`、Tap、像素时钟。然后存进 User Set，并设为上电默认（`UserSetSave` / `UserSetDefault`）。
+~~在 Windows 上用 VisionKit 把相机设好。~~ 手边没有能插 PCIe 卡的 Windows 电脑，这条走不通；改走第 9 节，从相机本身读 XML。
 
 ## 8. 待办（按顺序）
 
@@ -140,6 +154,26 @@ KDIR=<准备好的内核树> KERNEL_ANALYSIS=<kernel_analysis 目录> CROSS_COMP
 
 ### 8.3 之后
 
-- [ ] 16K 相机的 XML：Windows 上确认无实连缓存 XML（本地从未插过 PCIe 采集卡），下一步改为通过 `cam_serial=1` GenCP 从相机本身读取 XML（GenCP 清单表）。
-- [ ] 用 16K XML 核对 `cam_regs.h`，再启用 `cam_config`。
-- [ ] 在 `sg3000_rx.c` / `camera-probe` 中按 `camera enum` 拦截单路卡对 `port 1` 的访问。
+- [x] 16K 相机的 XML：不需要 Windows，从相机本身读（第 9 节，`camera-xml`）。**待上板。**
+- [ ] 用 16K XML 核对 `cam_regs.h`，再启用 `cam_config`（写相机）。
+- [x] 单路卡拦截 `port 1`：用户态读 camera enum 拒绝；驱动白名单去掉端口 1（需重编 `.ko`）。
+
+## 9. 从相机本身读 XML（GenCP 清单表）[标准 + 逆向]
+
+GenCP 标准规定相机必须把自己的 GenICam XML 存在设备里，并在 BRM 里给出"清单表"。
+VisionKit 读"设备 XML"走的就是这条路（`VisionKitApi.dll` `0x1800469b0..0x180047176`，日志串 `read device xml start/ok`），所以 Windows 电脑不是必需的。
+
+| 步骤 | 读的地址 | 长度 | 出处 |
+|---|---|---|---|
+| 清单表地址 T | BRM `0x01D0` | 8，大端 | `0x1800469c4` 立即数 `0x1d0`、长度 8 |
+| 条目数 | `T` | 8，大端 | `0x180046a83` |
+| 第 0 条 | `T + 8` | VisionKit 读 0x18；本仓库读整条 64 | `0x180046ad4`（`lea 0x8(%rbx)`、长度 `0x18`）|
+| 文件类型 | 条目 +4 的 bit10..15 | 0 = `.xml`，1 = `.zip` | `0x180046c4d`（`shr $0xa; and $0x3f`）|
+| XML 本体 | 条目 +8 的地址 | 条目 +16 的大小 | `0x180047176`，一次调用，内部按块读 |
+
+条目 64 字节：文件版本 4 | 格式版本 4 | 地址 8 | 大小 8 | SHA1 20 | 保留 20（GenCP 标准；VisionKit 用前 24 字节，与之一致）。
+
+- VisionKit 每块读 `0x210 − 0x10 = 512` 字节（`0x180029289`、`0x18002a452`）。本仓库保守用 256 字节一块，失败的块最多重试 3 次，重试前清掉串口残留。
+- 115200 波特下大约 9 KB/s：100 KB 的 zip 约 12 秒。
+- 相机在清单里给了 SHA1 时，中控台在板上跑 `sha1sum` 核对，不一致就报错重读。
+- 文件名：`<型号>_<主>.<次>.<小><.zip|.xml>`，存在板上 `/tmp/sg3000-board/camera-xml/`，取回电脑 `D:\SG3000_Captures\camera-xml\`。

@@ -52,6 +52,7 @@ int sg_block_header_read(struct sg_capture_session *s, uint64_t deadline_ms,
     int ret;
 
     /* ① 等"数据块就绪"，期间检查取消和超时。 */
+    s->stage = "wait block header (SG_HDR_READY)";
     for (;;) {
         if (sg_session_cancelled(s)) {
             return -ECANCELED;
@@ -71,6 +72,7 @@ int sg_block_header_read(struct sg_capture_session *s, uint64_t deadline_ms,
     }
 
     /* ② 照搬 Windows 的顺序：先"确认"，再依次拷贝各寄存器。 */
+    s->stage = "read block header";
     ret = sg_session_wr(s, SG_HDR_ACK, SG_HDR_ACK_VALUE);
     if (ret) {
         return ret;
@@ -202,6 +204,16 @@ static int receive_packets(struct sg_capture_session *s, const struct sg_capture
         if (ret) {
             return ret;
         }
+        s->last_hdr.valid = 1;
+        s->last_hdr.block_id = h.block_id;
+        s->last_hdr.seq = h.seq;
+        s->last_hdr.width = h.width;
+        s->last_hdr.lines = h.lines;
+        s->last_hdr.max_lines = h.max_lines;
+        s->last_hdr.payload_len = h.payload_len;
+        s->last_hdr.dest_offset = h.dest_offset;
+        s->last_hdr.src_addr = h.src_addr;
+        s->stage = "check block header";
         ret = sg_block_header_check(&h, expect_seq, filled);
         if (ret) {
             return ret;
@@ -213,6 +225,7 @@ static int receive_packets(struct sg_capture_session *s, const struct sg_capture
         if (packets == 0) {
             /* 第一个包：定下整块容量。 */
             capacity = (uint64_t)h.width * h.max_lines;
+            s->stage = "block size limit";
             if (capacity > o->max_frame_bytes) {
                 return -EFBIG;
             }
@@ -224,6 +237,7 @@ static int receive_packets(struct sg_capture_session *s, const struct sg_capture
             return -EPROTO;
         }
 
+        s->stage = "check packet bounds";
         is_last = (h.seq & SG_SEQ_LAST) != 0;
 
         if (end > capacity ||                       /* 不能写出整块之外 */
@@ -242,6 +256,7 @@ static int receive_packets(struct sg_capture_session *s, const struct sg_capture
         }
 
         /* 把这一包的数据搬进来。 */
+        s->stage = "DMA payload";
         ret = dma_payload(s, o, deadline, h.src_addr, frame->data + filled, h.payload_len);
         if (ret) {
             return ret;
