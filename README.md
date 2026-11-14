@@ -9,7 +9,7 @@
 ## 这个仓库是什么状态
 
 **2026-11-14：16384 × 2000 已在 ZCU102 实板采通**（相机和卡都 Base 3 Tap，一根线），相机经 GenCP 可读写。
-下一步：DMA 提速到 15 kHz（246 MB/s）、测试图验位、调亮，然后设计检测算法。**现状和下一步看 `docs/NEXT_STEPS.md`。**
+下一步：DMA 提速到 15 kHz（246 MB/s）、测试图验位、调亮，然后按 `docs/design/detection_plan.md`（检测方案）做光学、真值样片和算法。**现状和下一步看 `docs/NEXT_STEPS.md`。**
 
 **要上板：看 `docs/BRINGUP.md`。** 板上程序已编译好放在 `dist/glass-capture/`，拷到 SD 卡即可；中控台「S 一键上板测试」一次跑完待测项。
 

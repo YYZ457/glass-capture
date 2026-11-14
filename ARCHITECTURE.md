@@ -116,6 +116,8 @@ apps ─▶ stream ─▶ processing
 | `host/console/`、`host/tests/` | 中控台（Python 网页服务 + 串口通道 + 网口接收 + 离线检测）及测试 | 🟡 已改为部署本仓库程序、去掉二进制补丁、加网口；模拟板子端到端测过 |
 | `host/receiver/rx_tcp.py` | I6 接收端（命令行 + 中控台内置）| 🟡 已写，和 tx_tcp 对通 |
 | `host/detect/candidates.py` | 候选检测 Python 参考（和板上 C 同算法）| 🟡 已写 |
+| `host/detect/sim_particles.py`、`detect_v1.py`、`study_detectability.py` | 检测方案的依据：颗粒成像仿真、下一版算法的原型（只在电脑上跑）、可检性表 | 🟡 仿真条件下测过；默认参数多为假设，待实测替换 |
+| `docs/design/detection_plan.md` | 检测方案设计：光学、成像方式、算力、算法、验证、路线图 | 第 1 版 |
 | `fpga/` | 三个 HLS/RTL 包，原样保留，不细分（D001）| 🟡 |
 | `verify/V1-V4` | 测试图案、行完整性、暗场、真值比对 | 🟡 已写，合成图测过；V1 渐变公式待手册确认 |
 | `board/tests/` | 假卡测试、单元测试（`make -C board test`，x86 和 ARM64 模拟器都过）| 🟡 |
