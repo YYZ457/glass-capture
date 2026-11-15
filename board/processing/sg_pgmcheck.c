@@ -2,6 +2,7 @@
  *
  * sg_pgmcheck.c —— 见 sg_pgmcheck.h。一遍扫完整张图（16384 × 2000 = 32 MB 在 A53 上约 0.1–0.3 秒）。
  */
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -183,5 +184,113 @@ int sg_pgm_noise(const uint8_t *img, uint32_t width, uint32_t height, struct sg_
         }
     }
     free(sum); free(sq); free(dsq); free(sat);
+    return 0;
+}
+
+#define EDGE_NEAR 16u       /* 边缘两侧各留 16 像素不算平台 */
+#define EDGE_FAR 48u        /* 平台取到离边缘 48 像素处 */
+
+static double span_mean(const double *m, uint32_t a, uint32_t b)
+{
+    double s = 0;
+    uint32_t x;
+
+    for (x = a; x < b; ++x) s += m[x];
+    return s / (b - a);
+}
+
+int sg_pgm_profile(const uint8_t *img, uint32_t width, uint32_t height, uint32_t bins, struct sg_pgm_profile *out)
+{
+    uint64_t *sum, seg_n[SG_FOCUS_SEGMENTS];
+    uint32_t hist[2551], x, y, b, best_x = 0;
+    double *m, total_sq = 0, seg_sq[SG_FOCUS_SEGMENTS], best = 0, p1, p99;
+    uint64_t seen;
+
+    if (!img || !out || height == 0 || width < 128 || bins < 8 || bins > SG_PROFILE_MAX_BINS || bins > width) return -EINVAL;
+    memset(out, 0, sizeof *out);
+    sum = calloc(width, sizeof *sum);
+    m = malloc((size_t)width * sizeof *m);
+    if (!sum || !m) {
+        free(sum); free(m);
+        return -ENOMEM;
+    }
+    for (y = 0; y < height; ++y) {
+        const uint8_t *row = img + (size_t)y * width;
+        for (x = 0; x < width; ++x) sum[x] += row[x];
+    }
+    memset(hist, 0, sizeof hist);
+    for (x = 0; x < width; ++x) {
+        m[x] = (double)sum[x] / height;
+        hist[(uint32_t)(m[x] * 10.0 + 0.5)]++;
+    }
+
+    /* 轮廓 */
+    out->bins = bins;
+    for (b = 0; b < bins; ++b) {
+        uint32_t x0 = (uint32_t)((uint64_t)b * width / bins), x1 = (uint32_t)((uint64_t)(b + 1) * width / bins);
+        double lo = m[x0], hi = m[x0], s = 0;
+
+        for (x = x0; x < x1; ++x) {
+            s += m[x];
+            if (m[x] < lo) lo = m[x];
+            if (m[x] > hi) hi = m[x];
+        }
+        out->mean[b] = (uint16_t)(s / (x1 - x0) * 10.0 + 0.5);
+        out->min[b] = (uint16_t)(lo * 10.0 + 0.5);
+        out->max[b] = (uint16_t)(hi * 10.0 + 0.5);
+    }
+
+    /* 对比度：均值线的 1% 和 99% 分位 */
+    for (seen = 0, b = 0; b <= 2550 && seen + hist[b] <= (uint64_t)width / 100; ++b) seen += hist[b];
+    p1 = b / 10.0;
+    for (seen = 0, b = 2550; b > 0 && seen + hist[b] <= (uint64_t)width / 100; --b) seen += hist[b];
+    p99 = b / 10.0;
+    out->contrast = p99 > p1 ? p99 - p1 : 0.0;
+
+    /* 梯度：整体和分段的 RMS，以及最大处 */
+    memset(seg_sq, 0, sizeof seg_sq);
+    memset(seg_n, 0, sizeof seg_n);
+    for (x = 1; x + 1 < width; ++x) {
+        double g = (m[x + 1] - m[x - 1]) / 2.0;
+        uint32_t seg = (uint32_t)((uint64_t)x * SG_FOCUS_SEGMENTS / width);
+
+        total_sq += g * g;
+        seg_sq[seg] += g * g;
+        seg_n[seg]++;
+        if (fabs(g) > best && x >= EDGE_FAR && x + EDGE_FAR < width) {
+            best = fabs(g);
+            best_x = x;
+        }
+    }
+    out->sharpness = 1000.0 * sqrt(total_sq / (width - 2)) / (out->contrast + 1.0);
+    for (b = 0; b < SG_FOCUS_SEGMENTS; ++b)
+        out->seg_sharpness[b] = seg_n[b] ? 1000.0 * sqrt(seg_sq[b] / seg_n[b]) / (out->contrast + 1.0) : 0.0;
+
+    /* 最强边缘的 10%–90% 宽度 */
+    if (best > 0) {
+        double left = span_mean(m, best_x - EDGE_FAR, best_x - EDGE_NEAR);
+        double right = span_mean(m, best_x + EDGE_NEAR + 1, best_x + EDGE_FAR + 1);
+        double step = right - left;
+
+        if (fabs(step) >= 8.0) {
+            double x10 = (double)best_x - EDGE_NEAR, x90 = (double)best_x + EDGE_NEAR;
+            uint32_t i;
+
+            /* n(x) = (m − left) / step 从 0 升到 1。从边缘中心往左找 10%，往右找 90%，相邻两点间线性插值。 */
+            for (i = best_x; i > best_x - EDGE_NEAR; --i) {
+                double n1 = (m[i] - left) / step, n0 = (m[i - 1] - left) / step;
+                if (n0 <= 0.1 && n1 > 0.1) { x10 = (i - 1) + (0.1 - n0) / (n1 - n0); break; }
+            }
+            for (i = best_x; i < best_x + EDGE_NEAR; ++i) {
+                double n0 = (m[i] - left) / step, n1 = (m[i + 1] - left) / step;
+                if (n0 < 0.9 && n1 >= 0.9) { x90 = i + (0.9 - n0) / (n1 - n0); break; }
+            }
+            out->edge_found = 1;
+            out->edge_x = best_x;
+            out->edge_contrast = fabs(step);
+            out->edge_width_px = x90 > x10 ? x90 - x10 : 0.0;
+        }
+    }
+    free(sum); free(m);
     return 0;
 }

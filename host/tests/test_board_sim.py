@@ -359,3 +359,126 @@ def test_bundle_contains_board_session_script(tmp_path):
                    check=True, capture_output=True)
     assert b"\r\n" not in (out / "board_session.sh").read_bytes()
     assert "board_session.sh" in (out / "SHA256SUMS").read_text()
+
+
+def _use_sim_tool(tmp, monkeypatch):
+    """把板上的 sg3000-capture / sg_status 换成 sim_board_tool（假相机、假采集卡；pgm-stats、bench 仍是真程序）。"""
+    import transport as T
+    tool = REPO / "host" / "tests" / "sim_board_tool.py"
+    state = tmp / "simstate"
+    state.mkdir()
+    for name, text in (("sg3000-capture", f'#!/bin/sh\nexec {sys.executable} {tool} {state} {tmp}/bin/sg3000-capture "$@"\n'),
+                       ("sg_status", f'#!/bin/sh\nexec {sys.executable} {tool} {state} --status\n')):
+        (tmp / "board" / name).write_text(text)
+        (tmp / "board" / name).chmod(0o755)
+    params = tmp / "params"
+    params.mkdir()
+    (params / "cam_serial").write_text("Y\n")
+    (params / "dma_fast").write_text("N\n")
+    (tmp / "board" / "sg3000_rx.ko").write_text("fake ko\n")
+    (tmp / "shim" / "insmod").write_text(f'#!/bin/sh\ntouch "$SIM_DEVNODE"; echo Y > {params}/cam_serial\n'
+                                         f'case "$*" in *dma_fast=1*) echo Y;; *) echo N;; esac > {params}/dma_fast\n')
+    monkeypatch.setattr(T, "CAM_SERIAL_PARAM", str(params / "cam_serial"))
+    monkeypatch.setattr(T, "DMA_FAST_PARAM", str(params / "dma_fast"))
+
+
+def test_camera_page_snapshot_live_driver_bench(board, monkeypatch):
+    """中控台 1.0 新增的动作：相机参数总览、一键单线模式、平场校正命令、采一帧 / 实时调试、驱动切换、CPU 基准。"""
+    console, tmp = board
+    _use_sim_tool(tmp, monkeypatch)
+
+    job = run(console, "status")                      # 相机上电默认双线：预检不过，提示第二根线
+    assert job["status"] == "error" and "第二根" in job["message"], job
+    job = run(console, "camera_preset")               # 相机 Base 3 Tap + 卡宽度 16384 + 体检
+    assert job["status"] == "success", job
+    params = console.camera["params"]
+    assert params["ClConfiguration"]["raw"] == 0 and params["DeviceTapGeometry"]["raw"] == 3
+    assert console.checks["card"]["CameraWidth"] == 16384 and console.checks["preflight"]["passed"]
+    assert console.driver["cam_serial"] == "Y" and console.driver["dma_fast"] == "N"
+
+    job = run(console, "camera_get")
+    assert job["status"] == "success" and "只读" in job["message"], job
+    params = console.camera["params"]
+    assert params["ExposureTime"]["value"] == 50.0 and params["ExposureTime"]["max"] == 95.0
+    assert params["AnalogGain"]["locked"] is True and params["PixelFormat"]["raw"] == 0x01080001
+    assert params["Temperature"]["value"] == 41.5 and params["BlackLevel"]["min"] == -64.0
+
+    job = run(console, "camera_set", {"name": "ExposureTime", "value": 90})
+    assert job["status"] == "success" and "90.00 us" in job["message"], job
+    assert console.camera["params"]["ExposureTime"]["value"] == 90.0            # 写完顺带刷新了参数表
+    job = run(console, "camera_set", {"name": "AnalogGain", "value": 4})
+    assert job["status"] == "error" and "locked" in job["message"], job          # 相机 XML 的锁，照办
+    job = run(console, "camera_set", {"name": "DigitalShift", "value": 1})
+    assert job["status"] == "success", job
+
+    # 平场校正：出厂组锁定 → 选用户组 → 暗场、亮场命令 → 打开
+    job = run(console, "camera_set", {"name": "FFCCalFPN", "value": 1})
+    assert job["status"] == "error" and "FFCUserSetSelector" in job["message"], job
+    assert run(console, "camera_set", {"name": "FFCUserSetSelector", "value": 1})["status"] == "success"
+    job = run(console, "camera_set", {"name": "FFCCalFPN", "value": 1})
+    assert job["status"] == "success" and "暗场校正" in job["message"] and "断电" in job["message"], job
+    job = run(console, "camera_set", {"name": "FFCCalPRNU", "value": 1})
+    assert job["status"] == "success" and "亮场校正" in job["message"], job
+    assert run(console, "camera_set", {"name": "FFCEnable", "value": 1})["status"] == "success"
+    assert console.camera["params"]["FFCEnable"]["raw"] == 1
+    for bad in ({"name": "UserSetSave", "value": 1}, {"name": "FFCUserSetSave", "value": 1}, {"name": "DeviceReset", "value": 1},
+                {"name": "FFCCalFPN", "value": 0}, {"name": "FFCCalTargetValue", "value": 251}, {"name": "DigitalShift", "value": 5}):
+        with pytest.raises(ValueError):
+            console.start("camera_set", bad)                                    # "保存到相机"永远不在白名单里
+
+    # 采一帧：亮度、位、线轮廓、对焦指标
+    job = run(console, "snap", {"fetch": False})
+    assert job["status"] == "success" and "16384" in job["message"], job
+    live = console.live
+    assert live["count"] == 1 and live["width"] == 16384 and live["bits"]["seen"] == 0xff
+    assert live["profile"]["bins"] == 256 and len(live["profile"]["mean"]) == len(live["profile"]["max"]) == 256
+    assert max(live["profile"]["mean"]) > 100 and min(live["profile"]["min"]) < 60       # 亮背景 + 黑胶带
+    edge = live["focus"]["edge"]
+    assert edge and edge["x"] in range(5990, 6011) or edge["x"] in range(9990, 10011)
+    assert len(live["focus"]["segments"]) == 8 and live["focus"]["sharpness"] > 0
+    assert console.last_frame["name"].startswith("frame-") and console.last_frame["width"] == 16384
+
+    # 实时调试：连采 4 帧，只留最后一帧；模拟的焦点一帧比一帧清楚
+    job = run(console, "live", {"count": 4})
+    assert job["status"] == "success" and "共 4 帧" in job["message"], job
+    assert console.live["count"] == 5 and console.live["running"] is False and len(console.live["history"]) == 5
+    widths = [h["edge_width"] for h in console.live["history"]]
+    assert all(w is not None for w in widths) and widths[-1] < widths[0]
+    assert len(list((tmp / "boardcap").glob("live-*.pgm"))) == 1
+    with pytest.raises(ValueError):
+        console.stop_live()                                                      # 没在跑
+    console.clear_live_history()
+    assert console.live["history"] == []
+    with pytest.raises(ValueError):
+        console.start("live", {"count": -1})
+
+    job = run(console, "driver", {"dma_fast": True})
+    assert job["status"] == "success" and "快速模式" in job["message"] and console.driver["dma_fast"] == "Y", job
+    job = run(console, "driver", {"dma_fast": False})
+    assert job["status"] == "success" and console.driver["dma_fast"] == "N", job
+    with pytest.raises(ValueError):
+        console.start("driver", {"dma_fast": "yes"})
+
+    job = run(console, "bench")
+    assert job["status"] == "success", job
+    assert [r["name"] for r in console.bench] == ["memcpy", "stats", "candidates", "screen", "screen_2000", "candidates_2000"]
+    assert all(r["mbps"] > 0 and r["x15k"] > 0 for r in console.bench)
+
+    import json
+    state = json.loads(json.dumps(console.state()))                              # 整个状态能序列化给网页
+    assert {"camera", "live", "bench", "driver"} <= set(state) and state["live"]["profile"]["width"] == 16384
+
+
+def test_web_page_references_existing_elements():
+    """网页脚本里用到的每个元素 id 在 index.html 里都有；页面不含内联样式（内容安全策略会拦）。"""
+    import re
+    web = REPO / "host" / "console" / "web"
+    html = (web / "index.html").read_text(encoding="utf-8")
+    ids = re.findall(r'id="([^"]+)"', html)
+    assert len(ids) == len(set(ids))
+    assert " style=" not in html and "<style" not in html and "onclick=" not in html
+    for script in ("app.js", "defects.js"):
+        used = set(re.findall(r"\$\('([A-Za-z0-9-]+)'\)", (web / script).read_text(encoding="utf-8")))
+        assert used and not used - set(ids), (script, sorted(used - set(ids)))
+    app = (web / "app.js").read_text(encoding="utf-8")
+    assert "UserSetSave" not in app and "FFCUserSetSave" not in html

@@ -39,7 +39,7 @@ function invalidateDefects(message){
 }
 function drawOverview(){
   const canvas=$('defect-overview'),ctx=canvas.getContext('2d');
-  ctx.fillStyle='#162a24';ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle='#0b0b0c';ctx.fillRect(0,0,canvas.width,canvas.height);
   if(!defectPage||!overviewImage)return;
   // Preview sampling uses an integer step. Crop any padded edge cell to the
   // actual source extent before stretching, so full-resolution boxes align.

@@ -29,7 +29,7 @@
    ```
    必须看到 `Compile and target ABI checks passed.`。提交 `dist/glass-capture/` 推到 `main`。ABI 检查不过就把报错发回来。
 2. 用新 `dist/glass-capture/` 更新 SD 卡。只接第一根 Camera Link 线，不用网线。
-3. 中控台：00 → 01 → 02 → **S 一键上板测试**（约 4–6 分钟）。**拍实拍图那几步（第 4 步）请保持场景不动、画面里有亮有暗**（比如半边遮住），这样一张图就能算出相机的噪声模型。
+3. 中控台 1.1：右上角「设备」→ 连接（自动一键初始化）→ 设置 → 诊断 →「一键上板测试」（约 4–6 分钟）。界面说明和新旧按钮对照见 `BRINGUP.md` 第 4 节，装镜头后的调亮 / 对焦 / 平场校正见第 4½ 节。**拍实拍图那几步（第 4 步）请保持场景不动、画面里有亮有暗**（比如半边遮住），这样一张图就能算出相机的噪声模型。
    - 板上等价：`sh /tmp/sg3000-board/board_session.sh`
    - 它依次做：驱动 `cam_serial=1` → 相机和卡切 Base 3 Tap / 16384 → 测试图 3 / 2 / 1（板上逐像素判渐变、查 8 个位）→ 实拍：默认、曝光 50 / 90 µs、模拟增益 4 → 30 秒连续采集（旧 DMA）→ 重载 `dma_fast=1`，测试图验数据 + 30 秒连续采集 → `LineRate 15000` + 30 秒连续采集 → CPU 基准（`bench`，单跑 + 三个同时跑，不碰采集卡）。开头还会只读 5 个相机寄存器（FFC / TDI / 位移）。
    - 全部断电恢复：从不写相机 UserSetSave、卡 DeviceReboot / ManualFPGAReload。
@@ -78,6 +78,6 @@ python -I host/detect/study_detectability.py
 ## 5. 其他待办（按优先级）
 
 1. 上板后若 `dma_fast` 仍不够 246 MB/s：零拷贝（锁定用户页 + 分散聚集描述符，Xilinx 官方 XDMA 驱动的做法），按 `dma_stats` 哪段最慢再定。
-2. `dma_fast` 验证通过后改成默认开（中控台 02 加载时带参数）。
+2. `dma_fast` 验证通过后改成默认开（中控台加载驱动时带参数；现在可在 设置 → 驱动与程序 手动切）。
 3. 相机串口提速到 460800（相机 `DeviceSerialPortBaudRate` = SBRM `0x10004`，0x40；采集卡 UART 同步改分频）：读 XML / 寄存器快 4 倍，非必须。
 4. A 方案（第二根线，EightyBit 10 Tap）：只有 15 kHz 被相机拒绝、又不能降速时才需要。

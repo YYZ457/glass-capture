@@ -18,11 +18,12 @@ cam_config（宽度、行频、曝光……）      地址表 cam_regs.h [16K确
 
 | 命令 | 作用 | 中控台按钮 |
 |---|---|---|
-| `sg3000-capture camera-probe` | 厂商、型号、版本、序列号、GenCP 版本、XML 清单表 | C1 相机信息 |
-| `sg3000-capture camera-xml DIR` | 按清单表从相机读出它自己的 GenICam XML（.zip/.xml），打印 SHA1 | C2 读取相机 XML |
-| `sg3000-capture camera-regs NAME@ADDR:LEN ...` | 按清单读一串寄存器 | C3 读相机寄存器 |
+| `sg3000-capture camera-probe` | 厂商、型号、版本、序列号、GenCP 版本、XML 清单表 | 相机「⋯」→ 读取型号与序列号 |
+| `sg3000-capture camera-xml DIR` | 按清单表从相机读出它自己的 GenICam XML（.zip/.xml），打印 SHA1 | 相机「⋯」→ 导出相机 XML |
+| `sg3000-capture camera-regs NAME@ADDR:LEN ...` | 按清单读一串寄存器 | 相机「⋯」→ 按 XML 读取寄存器表 |
+| `sg3000-capture camera-get [--extended]` | 按固定表读常用参数，每行 `CameraParam NAME raw= [value=] [min= max=] [unit=] [locked=1]`；连续 2 个读错就停（`CameraParamAbort`） | 相机属性面板的刷新按钮；初始化最后一步 |
 | `sg3000-capture camera-read ADDR [LEN]` | 读任意地址，十六进制打印 | — |
-| `sg3000-capture camera-set NAME VALUE` | **唯一的相机写**，只改运行时值、从不写 UserSetSave。白名单见下表 | 写入相机 |
+| `sg3000-capture camera-set [--params] NAME VALUE` | **唯一的相机写**，只改运行时值、从不写 UserSetSave / FFCUserSetSave。白名单见下表；`--params` 写完再打印一遍 `CameraParam` 表 | 相机属性面板（回车即写） |
 
 `camera-set` 白名单（`board/camera_ctrl/cam_set.c`，地址、值域、锁定条件全部照相机 XML）：
 
@@ -33,13 +34,26 @@ cam_config（宽度、行频、曝光……）      地址表 cam_regs.h [16K确
 | `TestPattern` | `0x01100000` | 0 / 1 / 2 / 3 / 5 | 同左 | 16K XML 没有 4、6 |
 | `ExposureTime` | `0x01001010` | 微秒 | µs × 96 | 在相机给的 `[0x01001014, 0x01001018]` 内（随行频变）|
 | `DigitalGain` | `0x0120604c` | 0.10..15.99 倍 | 倍 × 256 | — |
-| `AnalogGain` | `0x01001c00` | 0..4 = 1.25/1.75/2/3/4 倍 | 同左 | `BinningV`（`0x01302040`）不为 1、2 |
+| `AnalogGain` | `0x01001c00` | 0..4 = 1.25/1.75/2/3/4 倍 | 同左 | `BinningV`（`0x01302040`）不为 1、2。**相机默认 Binning=1，所以实际上锁定**，调亮用 `DigitalShift` |
+| `LineRate` | `0x0100101c` | Hz | 周期 = 96e6 / Hz | 内触发；在相机给的范围内 |
+| `DigitalShift` | `0x01207040` | 0..4（×1/×2/×4/×8/×16） | 同左 | — |
+| `TDIStage` / `TDIMode` | `0x01106008` / `0x0110600c` | 0 / 1 | 同左 | — |
+| `BlackLevel` | `0x0120c050` | 整数（有符号） | 同左 | 在相机给的 `[0x0120c058, 0x0120c05c]` 内 |
+| `FFCEnable` | `0x01102000` | 0 / 1 | 同左 | — |
+| `FFCUserSetSelector` | `0x01102d00` | 0 出厂 / 1–3 用户 | 同左 | 只是选择，不读写闪存 |
+| `FFCSampleFrames` | `0x01102080` | 1024 / 2048 | 同左 | — |
+| `FFCCalTargetMode` / `FFCCalTargetValue` | `0x01102c04` / `0x01102c08` | 0 最亮 / 1 平均 / 2 指定；灰度 0..250 | 值 × 16 | 只有 mode = 2 时能写目标灰度 |
+| `FFCCalFPN`（暗场）/ `FFCCalPRNU`（亮场） | `0x01102084` / `0x01102088` | 只能是 1（命令） | 1 | 锁定：（`FFCFactory`=0 且选中出厂组）或 `ReverseX`=1。写后轮询 `ClConfiguration` 最多 15 秒等相机重新应答 |
+| `FFCUserSetLoad` | `0x01102d04` | 只能是 1（命令） | 1 | 把所选组在闪存里的校正数据读回内存 |
+
+永远不在白名单里：`UserSetSave`（`0x01600318`）、`FFCUserSetSave`（`0x01102d08`）、`DeviceReset`、`DeviceReboot`、`ManualFPGAReload`。
+平场校正的结果只在相机内存里，断电恢复；要长期使用时再商量是否开放保存。
 
 写之前核对型号必须是 `SW-WS2-CL16K-50M-SDE`，并读出上面用到的状态；写后读回，不一致报错。
 
 相机自己的 XML：`docs/vendor/camera_xml/SW-WS2-CL16K-50M-SDE_0.0.3.zip`（解压为 `SF6000V300R001C22XB003.xml`）。注意这台相机的 `ClConfiguration` 枚举 EightyBit = **3**，采集卡的是 **4**，两边编号不同。
 
-C3 的清单由电脑上的 `host/console/genicam.py` 从相机 XML 生成，读回的值也由它翻译成名字和枚举（`python host/console/genicam.py 相机.zip --decode 板上输出.txt`）。
+「按 XML 读取寄存器表」的清单由电脑上的 `host/console/genicam.py` 从相机 XML 生成，读回的值也由它翻译成名字和枚举（`python host/console/genicam.py 相机.zip --decode 板上输出.txt`）。
 
 **端口 1**：2026-11-14 实板上单路卡（camera enum `0x30424630`）跑 `--port 1` 触发 `nwl-pcie Slave error`，整板要重启。现在两道防线：
 1. 用户态：`--port 1` 先读 camera enum，低字节不是 `'1'`（双路）就拒绝，不碰任何端口 1 寄存器。

@@ -1,93 +1,441 @@
 <!doctype html>
-<html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SG3000 · 采集中控台</title><link rel="stylesheet" href="/style.css"></head>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GlassCapture · 采集中控台</title>
+<link rel="stylesheet" href="/style.css">
+</head>
 <body>
-<aside class="rail">
-  <div class="brand"><span class="brand-mark">▥</span><div>GLASS LAB<small>玻璃检测 · 采集工作站</small></div></div>
-  <div class="rail-label">WORKBENCH / 01</div>
-  <nav aria-label="主导航">
-    <button class="nav" data-view="defect-view"><span>00</span>离线检测</button>
-    <button class="nav active" data-view="control"><span>01</span>采集控制</button>
-    <button class="nav" data-view="source"><span>02</span>核心代码</button>
-    <button class="nav" data-view="history"><span>03</span>历史与验证</button>
-    <button class="nav" data-view="guide"><span>04</span>操作指南</button>
+
+<!-- ================= 顶部工具栏 ================= -->
+<header class="appbar">
+  <div class="brand"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="1" y="1" width="18" height="18" rx="4"/><path d="M5 7h10M5 10h10M5 13h6"/></svg>GlassCapture</div>
+  <nav class="modes" aria-label="工作区">
+    <button class="mode active" data-view="acquire">采集</button>
+    <button class="mode" data-view="run">连续运行<span class="mode-dot" id="nav-run" hidden></span></button>
+    <button class="mode" data-view="offline">离线分析</button>
   </nav>
-  <div class="rail-bottom"><span class="tiny-dot"></span> 本机控制 · 串口连接<p>ZCU102 / SG3000<br>16K · 分块预处理 · 候选合并</p><div class="version">集成中控台 0.4 / 首图离线处理</div></div>
-</aside>
-<main>
-  <header><div class="breadcrumb">玻璃检测凌云光方案实践 <span>/</span> <b id="crumb">采集控制</b></div><div id="service" class="service">本机服务连接中</div></header>
-  <section id="defect-view" class="view">
-    <div class="title-row"><div><div class="eyebrow">LINE SCAN / DEFECT EXPLORER</div><h1>跨过分块，看清候选。</h1><p class="subtitle">处理合成输入或本地 Mono8 图像。点选候选，检查块边界附近的细节。</p></div><span class="chip amber">电脑离线处理 · 未验证硬件来源</span></div>
-    <section class="panel demo-controls"><div class="section-title"><div><h2>运行离线预处理</h2><p>使用原生 C++ 在电脑执行，自动接入跨条带合并；保留输入来源和全局坐标。</p></div><span id="defect-status" class="chip" role="status">尚未运行</span></div>
-      <div class="stream-form defect-source-form"><label>输入来源<select id="defect-source"><option value="defects">16K 合成输入</option><option value="frames">本地导入 PGM</option></select></label><label id="defect-upload-label" class="file-button">导入 P5 Mono8<input id="defect-upload" type="file" accept=".pgm,image/x-portable-graymap"></label><label id="defect-input-group" hidden>已导入图像<select id="defect-input"><option value="">选择已导入图像</option></select></label><span class="defect-upload-note">最多 8 MiB 像素；复制相机首图到电脑后从此导入。</span></div><div class="stream-form"><label>邻域半径<select id="defect-radius"><option value="7">7 · 15 × 15</option><option value="3">3 · 7 × 7</option><option value="1">1 · 3 × 3</option><option value="0">0 · 仅中心像素</option></select></label><label>响应阈值<input id="defect-threshold" type="number" min="1" max="255" value="25"></label><label>候选极性<select id="defect-polarity"><option value="both">亮 + 暗</option><option value="bright">仅亮候选 · 暗场起点</option><option value="dark">仅暗候选</option></select></label><button id="defect-start" class="primary">运行 16K 离线演示</button><button id="defect-replay">回放随包结果</button></div>
-      <div class="demo-note" id="defect-message" role="status">核心块 256 × 64，上下左右保留邻域。计算完成后只输出核心区，避免重复统计。</div>
-    </section>
-    <div class="defect-metrics"><div><small>图像尺寸</small><strong id="defect-dimensions">—</strong></div><div><small>候选数量</small><strong id="defect-count">—</strong></div><div><small>输入缓存峰值</small><strong id="defect-cache">—</strong></div><div><small>结果性质</small><strong>候选 · 未作质量判定</strong></div></div>
-    <section class="panel defect-inspector"><div class="section-title"><h2>全宽定位图</h2><div class="defect-tools"><label for="defect-runs">记录</label><select id="defect-runs"><option value="">尚无结果</option></select><button id="defect-export" disabled>导出候选 JSON</button></div></div>
-      <div class="defect-provenance" id="defect-provenance">每份结果保留执行来源和参数。离线回放不会改变硬件连接状态。</div>
-      <div class="strip-stage"><canvas id="defect-overview" width="2048" height="240" aria-label="全宽候选定位图"></canvas><div id="defect-empty" class="strip-empty">运行一次任务，或手动选择历史记录</div></div><div class="strip-scale"><span>x = 0</span><span>全宽定位 · 纵向放大显示 · <b class="bright-key">亮</b> / <b class="dark-key">暗</b></span><span id="defect-axis">x = —</span></div>
-      <div class="defect-detail-grid"><div class="candidate-list"><div class="candidate-heading"><h3>候选列表</h3><span id="defect-page">—</span></div><div class="candidate-scroll"><table><thead><tr><th>候选</th><th>起点 x / y</th><th>面积</th><th>峰值</th></tr></thead><tbody id="defect-rows"></tbody></table></div><div class="candidate-pagination"><button id="defect-prev" disabled>上一页</button><button id="defect-next" disabled>下一页</button></div></div>
-      <div class="candidate-detail"><div class="candidate-heading"><h3 id="defect-selected">选择候选查看局部</h3><select id="defect-layer" aria-label="定位图与局部图层" disabled><option value="source" disabled>导入原始图</option><option value="corrected" selected>校正灰度图</option><option value="mask">候选掩膜</option></select></div><canvas id="defect-crop" width="512" height="180" aria-label="候选原像素裁剪"></canvas><p id="defect-coordinates">坐标来自原始全宽图像，裁剪不参与算法计算。</p><div class="inline-note">细框为候选范围；虚线为 x=256 / y=64 等核心分块边界。只有显示缩放，算法没有缩小输入。</div></div></div>
-    </section>
-    <section class="panel integration-note"><div><div class="eyebrow">NEXT CONNECTION</div><h2>相机首图到电脑后，从导入开始。</h2><p>已接通：本地 P5 Mono8 文件 → 原生预处理 → 全局坐标候选 → 定位与局部查看。请先在采集端保存首图、复制到电脑，再导入离线检测。文件导入不证明 DMA / PL 或相机链路已通过。</p></div><div><button data-file="firstframe">第一帧操作顺序 →</button><button data-file="frames">真实文件接口 →</button><button data-file="frameschema">候选数据格式 →</button><button data-file="tilecontract">FPGA 模块合同 →</button></div></section>
-  </section>
-  <section id="control" class="view active">
-    <div class="title-row"><div><div class="eyebrow">ACQUISITION CONTROL</div><h1>看见每一步采集。</h1><p class="subtitle">从板卡连接到图像接收，让状态、操作与代码都可追溯。</p></div><span class="chip" id="connection-chip">未连接硬件</span></div>
-    <div class="connection panel"><div><h2>连接实验台</h2><p>J83 USB 串口 · 115200 / 8N1</p></div><div class="connection-fields"><label for="port">串口</label><select id="port"><option value="">正在查找串口…</option></select><button id="refresh" class="icon-button" title="刷新串口" aria-label="刷新串口">↻</button><button id="connect" class="primary">连接</button><button id="disconnect" disabled>断开</button></div><div class="connection-note" id="port-note">不会自动连接。请勿与其他串口调试程序同时使用同一端口。</div></div>
-    <div class="chain" aria-label="采集链路">
-      <div><span class="step-number">01</span><strong>ZCU102 / Linux</strong><small id="linux-state">等待检查</small></div><span class="chain-arrow">→</span>
-      <div><span class="step-number">02</span><strong>PCIe / SG3000</strong><small id="pci-state">等待检查</small></div><span class="chain-arrow">→</span>
-      <div><span class="step-number">03</span><strong>Camera Link / CL1</strong><small id="clock-state">等待信号检查</small></div><span class="chain-arrow">→</span>
-      <div><span class="step-number">04</span><strong>DMA / 图像</strong><small id="dma-state">尚未采集</small></div>
+  <div class="tools" id="acq-tools">
+    <button class="tool" id="snap" title="采集一帧并计算线轮廓、亮度和对焦指标"><svg viewBox="0 0 20 20"><rect x="3" y="5" width="14" height="11" rx="2"/><circle cx="10" cy="10.5" r="3"/><path d="M7.5 5l1-2h3l1 2"/></svg><span>单帧</span></button>
+    <button class="tool" id="live-start" title="连续采图，每 2–4 秒刷新一次，用于调亮度和对焦"><svg viewBox="0 0 20 20"><path d="M6 4.5v11l9-5.5z"/></svg><span>实时</span></button>
+    <button class="tool" id="stop" title="停止当前操作" disabled><svg viewBox="0 0 20 20"><rect x="5" y="5" width="10" height="10" rx="1.5"/></svg><span>停止</span></button>
+    <span class="tool-sep"></span>
+    <button class="tool" id="fetch" title="把板上最新的一帧传回电脑（网口约 1 秒，串口约 7 分钟）"><svg viewBox="0 0 20 20"><path d="M10 3v9M6 8.5l4 4 4-4M4 16h12"/></svg><span>保存到电脑</span></button>
+  </div>
+  <div class="appbar-right">
+    <button class="device-btn" id="device-btn" aria-haspopup="true" aria-expanded="false"><span class="dot" id="device-dot"></span><span id="device-label">未连接</span><svg class="caret" viewBox="0 0 10 10"><path d="M2.5 4l2.5 2.5L7.5 4"/></svg></button>
+    <button class="icon-btn" id="help-btn" title="操作指南"><svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="7.5"/><path d="M7.8 8a2.3 2.3 0 1 1 3.2 2.1c-.7.3-1 .8-1 1.5v.4M10 14.5v.2"/></svg></button>
+    <button class="icon-btn" id="settings-btn" title="设置"><svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="2.6"/><path d="M10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2M4.7 4.7l1.4 1.4M13.9 13.9l1.4 1.4M4.7 15.3l1.4-1.4M13.9 6.1l1.4-1.4"/></svg></button>
+  </div>
+</header>
+
+<!-- 设备面板（点右上角的设备按钮弹出） -->
+<div class="popover device-pop" id="device-pop" hidden>
+  <div class="pop-section">
+    <div class="pop-title">串口</div>
+    <div class="row">
+      <select id="port" class="grow"><option value="">正在查找串口…</option></select>
+      <button class="btn icon" id="refresh" title="重新查找串口"><svg viewBox="0 0 20 20"><path d="M15.5 8A6 6 0 1 0 16 11.5M15.5 3.5V8H11"/></svg></button>
     </div>
-    <div class="work-grid">
-      <section class="panel actions"><div class="section-title"><h2>操作序列</h2><span>由上到下</span></div>
-        <button id="wake" class="action" disabled><b>00</b><div><strong>唤醒终端</strong><small>发送回车，等待 Linux root 提示符</small></div><span>↵</span></button>
-        <button data-action="probe" class="action" disabled><b>01</b><div><strong>检查板卡</strong><small>板型、内核、PCIe 身份和 SD 卡</small></div><span>↗</span></button>
-        <button data-action="prepare" class="action" disabled><b>02</b><div><strong>从 SD 加载程序</strong><small>只读挂载 SD/glass-capture、校验、拷贝三个程序、加载驱动</small></div><span>↗</span></button>
-        <button data-action="status" class="action" disabled><b>02½</b><div><strong>只读体检</strong><small>sg_status：驱动信息、预检五项、两个状态寄存器</small></div><span>↗</span></button>
-        <button data-action="card_xml" class="action" disabled><b>02¾</b><div><strong>读取采集卡 XML</strong><small>只读：从卡存储读出 SGCard.xml 存到电脑（1–2 分钟）</small></div><span>↗</span></button>
-        <button data-action="camera_probe" class="action" disabled><b>C1</b><div><strong>相机信息</strong><small>只读：经 CL 串口读相机型号、序列号、XML 清单（需新驱动）</small></div><span>↗</span></button>
-        <button data-action="camera_xml" class="action" disabled><b>C2</b><div><strong>读取相机 XML</strong><small>只读：从相机本身读出 GenICam XML 存到电脑，不需要 Windows</small></div><span>↗</span></button>
-        <button data-action="camera_regs" class="action" disabled><b>C3</b><div><strong>读相机寄存器</strong><small>只读：按相机 XML 读宽度、像素格式、Tap、CL 配置、行频</small></div><span>↗</span></button>
-        <button data-action="board_session" class="action" disabled><b>S</b><div><strong>一键上板测试</strong><small>测试图、调亮、DMA 吞吐、15 kHz、CPU 基准一次跑完（约 4–6 分钟），结果包自动取回（BRINGUP 5⅞ + 5⁹）</small></div><span>↗</span></button>
-        <button data-action="preflight" class="action" disabled><b>03</b><div><strong>检查采集条件</strong><small>读取 DDR、CL1 时钟与图像格式</small></div><span>↗</span></button>
-        <button data-action="capture" class="action capture" disabled><b>04</b><div><strong>采集一帧</strong><small>极速单帧采集 · 保存至板上内存</small></div><span>↗</span></button>
-        <button data-action="fetch_last" class="action" disabled><b>05</b><div><strong>回传最新图像到电脑</strong><small>网口已配置走网口（约 1 秒），否则走 USB 串口（约 7 分钟）</small></div><span>📥</span></button>
-        <div class="net-form"><label>采集卡参数<select id="card-name"><option>CameraWidth</option><option>CameraHeight</option><option>DeviceTapGeometry</option><option>ClConfiguration</option><option>CameraScanType</option></select></label><label>数值<input id="card-value" type="number" value="16384" min="0"></label><button id="card-set" disabled>写入采集卡（停止采集时）</button><small>写之前先看「02½ 只读体检」里的 CardParam 当前值。断电后恢复默认。</small></div>
-        <div class="net-form"><label>相机参数<select id="camera-name"><option>TestPattern</option><option>ExposureTime</option><option>AnalogGain</option><option>DigitalGain</option><option>LineRate</option><option>ClConfiguration</option><option>DeviceTapGeometry</option></select></label><label>数值<input id="camera-value" type="number" value="3" step="any" min="0"></label><button id="camera-set" disabled>写入相机（不保存）</button><small>TestPattern 0 关 / 1 黑 / 2 白 / 3 水平渐变 / 5 移动渐变；ExposureTime 微秒（相机按行频限上限）；AnalogGain 0–4 = 1.25/1.75/2/3/4 倍；DigitalGain 0.10–15.99 倍；LineRate 行频 Hz（相机按宽度和 CL 模式限上限）；ClConfiguration 0 Base / 3 EightyBit；DeviceTapGeometry 2/3（仅 Base）。相机断电恢复。</small></div>
-        <div class="net-form"><label>电脑 IP<input id="net-pc" placeholder="192.168.1.10" autocomplete="off"></label><label>板子 IP<input id="net-board" placeholder="192.168.1.20（已有可留空）" autocomplete="off"></label><button id="net-setup" disabled>配置网口并测试</button><small id="net-state">网口未配置：回传走 USB 串口。</small></div>
-        <div class="action-footer"><button data-action="dmesg" disabled>读取内核日志</button><button data-action="release" disabled>卸载接收驱动</button></div>
+    <div class="row">
+      <button class="btn primary grow" id="connect">连接</button>
+      <button class="btn grow" id="disconnect" disabled>断开</button>
+    </div>
+    <p class="fine" id="port-note">J83 USB · 115200 8N1</p>
+  </div>
+  <div class="pop-section">
+    <div class="pop-title">初始化<span class="pop-aside" id="init-progress"></span></div>
+    <ol class="checklist" id="steps"></ol>
+    <button class="btn primary block" id="init">一键初始化</button>
+  </div>
+  <div class="pop-foot" id="device-info">—</div>
+</div>
+
+<!-- 相机“更多”菜单 -->
+<div class="popover menu" id="cam-menu" hidden>
+  <button data-action="camera_preset" title="相机 ClConfiguration 0、DeviceTapGeometry 3；采集卡 CameraWidth 16384；然后体检">切换到 Base 3 Tap / 16384</button>
+  <hr>
+  <button data-action="camera_probe">读取型号与序列号</button>
+  <button data-action="camera_xml">导出相机 XML 到电脑</button>
+  <button data-action="camera_regs">按 XML 读取寄存器表</button>
+</div>
+
+<!-- ================= 工作区 ================= -->
+<div class="workspace">
+  <div class="banner" id="banner" hidden role="alert">
+    <svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="7.5"/><path d="M10 6v5M10 13.5v.2"/></svg>
+    <div class="banner-text"><b id="banner-title"></b><span id="banner-text"></span></div>
+    <button class="btn sm" id="banner-log">查看日志</button>
+    <button class="btn sm ghost" id="banner-close" title="关闭">✕</button>
+  </div>
+
+  <!-- ---------- 采集 ---------- -->
+  <section class="view active" id="acquire">
+    <div class="stage">
+      <div class="stage-bar">
+        <div class="tabs" role="tablist">
+          <button class="tab active" data-pane="profile-pane">线轮廓</button>
+          <button class="tab" data-pane="image-pane">图像</button>
+        </div>
+        <span class="stage-info" id="snap-at"></span>
+        <span class="stage-info mono right" id="profile-readout"></span>
+        <button class="btn sm toggle" id="focus-toggle" aria-pressed="true" title="显示 / 隐藏对焦辅助">对焦辅助</button>
+      </div>
+
+      <div class="stage-body">
+        <div class="pane active" id="profile-pane">
+          <canvas id="profile" aria-label="线轮廓：横轴像素位置，纵轴灰度"></canvas>
+          <div class="empty-state" id="stage-empty" hidden>
+            <b id="stage-empty-title">未连接设备</b>
+            <span id="stage-empty-text">连接并初始化后即可采图</span>
+            <button class="btn primary" id="stage-connect">连接设备</button>
+          </div>
+        </div>
+        <div class="pane" id="image-pane">
+          <div class="pane-bar">
+            <span class="stage-info" id="image-info">无图像</span>
+            <span class="right row">
+              <button class="btn sm" id="view-latest-btn" disabled>载入最新回传</button>
+              <label class="btn sm file-button">打开 PGM…<input id="pgm" type="file" accept=".pgm"></label>
+            </span>
+          </div>
+          <div class="viewer"><div class="empty" id="image-empty">没有图像</div><canvas id="image" hidden></canvas></div>
+          <p class="fine path" id="board-frame" hidden></p>
+        </div>
+      </div>
+
+      <div class="readouts">
+        <div class="ro" title="整帧平均灰度"><small>平均</small><b id="t-mean">—</b></div>
+        <div class="ro" title="1% / 50% / 99% 分位"><small>P1 / P50 / P99</small><b id="t-pct">—</b></div>
+        <div class="ro"><small>最小 – 最大</small><b id="t-range">—</b></div>
+        <div class="ro" id="tile-sat" title="灰度 = 255 的像素数"><small>饱和</small><b id="t-sat">—</b></div>
+        <div class="ro" id="bits-cell"><small>位</small><span class="bits" id="bits"></span></div>
+        <div class="ro-sep"></div>
+        <div class="ro" id="tile-edge"><small>边缘宽度</small><b id="t-edge">—</b></div>
+        <div class="ro"><small>锐度</small><b id="t-sharp">—</b><em id="t-sharp-note"></em></div>
+        <div class="ro advice" id="bright-advice"></div>
+      </div>
+
+      <div class="focus-dock" id="focus-dock">
+        <div class="dock-cell grow">
+          <div class="dock-head"><span>锐度趋势</span><span class="fine" id="t-edge-note"></span><button class="btn xs ghost" id="history-clear">清空</button></div>
+          <div class="dock-plot"><canvas id="focus-history" aria-label="锐度随时间变化"></canvas></div>
+        </div>
+        <div class="dock-cell seg-cell">
+          <div class="dock-head"><span>宽度方向 8 段锐度</span><span class="fine" title="两端与中间接近 = 相机与玻璃平行">调平参考</span></div>
+          <div class="segbars" id="segbars"></div>
+        </div>
+      </div>
+    </div>
+
+    <aside class="inspector" aria-label="相机属性">
+      <div class="insp-head">
+        <div><b>相机</b><span class="fine" id="cam-at">未读取</span></div>
+        <button class="btn icon" id="cam-refresh" title="读取相机当前参数（只读）"><svg viewBox="0 0 20 20"><path d="M15.5 8A6 6 0 1 0 16 11.5M15.5 3.5V8H11"/></svg></button>
+        <button class="btn icon" id="cam-more" title="更多"><svg viewBox="0 0 20 20"><circle cx="5" cy="10" r="1.3"/><circle cx="10" cy="10" r="1.3"/><circle cx="15" cy="10" r="1.3"/></svg></button>
+      </div>
+
+      <details class="group" open data-group="imaging">
+        <summary>采集</summary>
+        <div class="props" id="cam-imaging"></div>
+      </details>
+
+      <details class="group" data-group="ffc">
+        <summary>平场校正<span class="sum-aside" id="ffc-state">—</span></summary>
+        <div class="props">
+          <div class="prop"><label for="ffc-set">校正组</label>
+            <div class="ctl"><select id="ffc-set"><option value="0">出厂</option><option value="1">用户 1</option><option value="2">用户 2</option><option value="3">用户 3</option></select></div></div>
+          <div class="prop"><label for="ffc-enable">启用</label>
+            <div class="ctl"><label class="switch"><input type="checkbox" id="ffc-enable"><i></i></label></div></div>
+          <div class="prop-sep">暗场</div>
+          <div class="prop"><label title="盖上镜头盖或关掉光源后执行">暗场校正</label>
+            <div class="ctl"><button class="btn sm grow" id="ffc-dark">执行…</button></div></div>
+          <div class="prop-sep">亮场</div>
+          <div class="prop"><label for="ffc-mode">校正目标</label>
+            <div class="ctl"><select id="ffc-mode"><option value="0">最亮像素</option><option value="1">平均值</option><option value="2">指定灰度</option></select></div></div>
+          <div class="prop"><label for="ffc-target">目标灰度</label>
+            <div class="ctl"><input id="ffc-target" type="number" min="0" max="250" step="1" value="180"></div></div>
+          <div class="prop"><label for="ffc-frames">采样行数</label>
+            <div class="ctl"><select id="ffc-frames"><option value="1024">1024</option><option value="2048">2048</option></select></div></div>
+          <div class="prop"><label title="光源均匀照满整条线、无玻璃和靶标、不饱和时执行">亮场校正</label>
+            <div class="ctl"><button class="btn sm grow" id="ffc-bright">执行…</button></div></div>
+          <p class="prop-note warn" id="ffc-lock" hidden></p>
+          <div class="prop-foot"><span class="fine">结果只在相机内存中，断电恢复</span><button class="btn xs ghost" id="ffc-load" title="FFCUserSetLoad：把所选组在相机闪存中的数据重新读入">从闪存恢复</button></div>
+        </div>
+      </details>
+
+      <details class="group" data-group="advanced">
+        <summary>高级<span class="sum-aside" id="adv-state"></span></summary>
+        <div class="props" id="cam-advanced"></div>
+      </details>
+
+      <details class="group" data-group="info">
+        <summary>设备信息</summary>
+        <dl class="info" id="cam-info"></dl>
+      </details>
+    </aside>
+  </section>
+
+  <!-- ---------- 连续运行 ---------- -->
+  <section class="view" id="run">
+    <div class="stage padded">
+      <div class="run-head"><h2>连续接收与处理</h2><span class="tag" id="stream-badge">未开始</span></div>
+      <div class="kpis">
+        <div class="kpi primary" id="tile-rate"><small>吞吐</small><b id="stream-rate">—</b><em>目标 246 MB/s（15 kHz × 16384）</em></div>
+        <div class="kpi"><small>已处理块</small><b id="stream-count">—</b></div>
+        <div class="kpi"><small>当前块 / 尺寸</small><b id="stream-block">—</b></div>
+        <div class="kpi"><small>灰度范围 / 均值</small><b id="stream-gray">—</b></div>
+        <div class="kpi"><small>判定</small><b id="stream-decision">—</b></div>
+      </div>
+      <div class="report" id="stream-summary"></div>
+    </div>
+    <aside class="inspector">
+      <div class="insp-head"><div><b>运行参数</b></div></div>
+      <div class="props flat">
+        <div class="prop"><label for="stream-seconds">时长</label>
+          <div class="ctl"><select id="stream-seconds"><option value="30">30 秒</option><option value="60">60 秒</option><option value="300">5 分钟</option><option value="0">直到停止</option></select></div></div>
+        <div class="prop"><label for="stream-processor">处理</label>
+          <div class="ctl"><select id="stream-processor"><option value="stats">灰度统计</option><option value="candidates">颗粒候选</option></select></div></div>
+        <div class="prop"><label>DMA 模式</label>
+          <div class="ctl"><span class="val" id="run-dma">—</span><button class="btn xs ghost" id="run-dma-link">更改</button></div></div>
+        <div class="row actions">
+          <button class="btn primary grow" id="start-stream">开始</button>
+          <button class="btn grow" id="stream-stop" disabled>停止</button>
+        </div>
+        <button class="btn sm ghost block" id="replay" title="回放随包的合成记录，不碰硬件">离线回放（合成数据）</button>
+      </div>
+    </aside>
+  </section>
+
+  <!-- ---------- 离线分析 ---------- -->
+  <section class="view" id="offline">
+    <div class="stage padded">
+      <div class="run-head"><h2>全宽定位图</h2><span id="defect-status" class="chip" role="status">尚未运行</span>
+        <span class="right row"><select id="defect-runs" aria-label="历史结果"><option value="">尚无结果</option></select><button class="btn sm" id="defect-export" disabled>导出 JSON</button></span></div>
+      <div class="strip-stage"><canvas id="defect-overview" width="2048" height="240" aria-label="全宽候选定位图"></canvas><div id="defect-empty" class="strip-empty">运行一次，或选择历史结果</div></div>
+      <div class="strip-scale"><span>x = 0</span><span><b class="bright-key">■ 亮</b>　<b class="dark-key">■ 暗</b></span><span id="defect-axis">x = —</span></div>
+      <div class="kpis compact">
+        <div class="kpi"><small>图像尺寸</small><b id="defect-dimensions">—</b></div>
+        <div class="kpi"><small>候选数量</small><b id="defect-count">—</b></div>
+        <div class="kpi"><small>输入缓存峰值</small><b id="defect-cache">—</b></div>
+      </div>
+      <div class="defect-detail-grid">
+        <div class="candidate-list"><div class="candidate-heading"><h3>候选</h3><span class="fine" id="defect-page">—</span></div>
+          <div class="candidate-scroll"><table><thead><tr><th>候选</th><th>起点 x / y</th><th>面积</th><th>峰值</th></tr></thead><tbody id="defect-rows"></tbody></table></div>
+          <div class="candidate-pagination"><button class="btn sm" id="defect-prev" disabled>上一页</button><button class="btn sm" id="defect-next" disabled>下一页</button></div></div>
+        <div class="candidate-detail"><div class="candidate-heading"><h3 id="defect-selected">局部</h3><select id="defect-layer" aria-label="图层" disabled><option value="source" disabled>导入原始图</option><option value="corrected" selected>校正灰度图</option><option value="mask">候选掩膜</option></select></div>
+          <canvas id="defect-crop" width="512" height="180" aria-label="候选局部"></canvas>
+          <p class="fine" id="defect-coordinates"></p></div>
+      </div>
+      <p class="fine" id="defect-provenance"></p>
+    </div>
+    <aside class="inspector">
+      <div class="insp-head"><div><b>离线预处理</b><span class="fine">在电脑上运行，不碰硬件</span></div></div>
+      <div class="props flat">
+        <div class="prop"><label for="defect-source">输入</label>
+          <div class="ctl"><select id="defect-source"><option value="defects">16K 合成输入</option><option value="frames">导入的 PGM</option></select></div></div>
+        <div class="prop" id="defect-input-group" hidden><label for="defect-input">图像</label>
+          <div class="ctl"><select id="defect-input"><option value="">选择已导入图像</option></select></div></div>
+        <div class="prop"><label></label><div class="ctl"><label id="defect-upload-label" class="btn sm file-button grow">导入 P5 Mono8…<input id="defect-upload" type="file" accept=".pgm,image/x-portable-graymap"></label></div></div>
+        <div class="prop-sep">参数</div>
+        <div class="prop"><label for="defect-radius">邻域半径</label>
+          <div class="ctl"><select id="defect-radius"><option value="7">7（15 × 15）</option><option value="3">3（7 × 7）</option><option value="1">1（3 × 3）</option><option value="0">0（仅中心）</option></select></div></div>
+        <div class="prop"><label for="defect-threshold">响应阈值</label>
+          <div class="ctl"><input id="defect-threshold" type="number" min="1" max="255" value="25"></div></div>
+        <div class="prop"><label for="defect-polarity">极性</label>
+          <div class="ctl"><select id="defect-polarity"><option value="both">亮 + 暗</option><option value="bright">仅亮</option><option value="dark">仅暗</option></select></div></div>
+        <div class="row actions"><button class="btn primary grow" id="defect-start">运行</button></div>
+        <button class="btn sm ghost block" id="defect-replay">回放随包结果</button>
+        <p class="fine" id="defect-message"></p>
+      </div>
+    </aside>
+  </section>
+
+  <!-- 日志面板（状态栏右侧按钮展开） -->
+  <section class="logdock" id="logdock" hidden>
+    <div class="logdock-head">
+      <b>日志</b><span class="fine">发给板子的命令和板子的原始回显</span>
+      <span class="right row">
+        <label class="check"><input id="autoscroll" type="checkbox" checked> 跟随</label>
+        <button class="btn xs ghost" id="log-size">加高</button>
+        <button class="btn xs ghost" id="export">导出</button>
+        <button class="btn xs ghost" id="log-close" title="收起">✕</button>
+      </span>
+    </div>
+    <pre id="terminal" tabindex="0" aria-label="串口原始日志"></pre>
+  </section>
+</div>
+
+<!-- ================= 状态栏 ================= -->
+<footer class="statusbar">
+  <div class="sb-job" id="sb-job"><i id="sb-job-icon"></i><span id="sb-job-text">就绪</span></div>
+  <div class="sb-items">
+    <span class="sb" id="sb-serial"><i class="dot"></i><span>串口</span></span>
+    <span class="sb" id="sb-card"><i class="dot"></i><span>采集卡</span></span>
+    <span class="sb" id="sb-camera"><i class="dot"></i><span>相机</span></span>
+    <span class="sb" id="sb-net"><i class="dot"></i><span>网口</span></span>
+    <span class="sb" id="service"><i class="dot" id="service-dot"></i><span id="service-text">服务</span></span>
+  </div>
+  <button class="sb-btn" id="log-toggle" aria-expanded="false">日志</button>
+</footer>
+
+<!-- ================= 设置 / 帮助 ================= -->
+<div class="overlay" id="settings" hidden>
+  <div class="dialog settings" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <nav class="set-nav">
+      <div class="set-nav-title" id="settings-title">设置</div>
+      <div class="set-group">硬件</div>
+      <button data-sec="sec-card" class="active">采集卡</button>
+      <button data-sec="sec-driver">驱动与程序</button>
+      <button data-sec="sec-network">网络</button>
+      <div class="set-group">工具</div>
+      <button data-sec="sec-diag">诊断</button>
+      <button data-sec="sec-prefs">偏好</button>
+      <div class="set-group">帮助</div>
+      <button data-sec="sec-guide">操作指南</button>
+      <button data-sec="sec-source">源代码</button>
+      <button data-sec="sec-history">历史记录</button>
+      <button data-sec="sec-about">关于</button>
+    </nav>
+    <div class="set-body">
+      <button class="btn icon set-close" id="settings-close" title="关闭 (Esc)">✕</button>
+
+      <section class="set-sec active" id="sec-card">
+        <h2>采集卡</h2>
+        <div class="set-block">
+          <div class="set-row"><div><b>状态</b><span class="fine" id="card-at">尚未体检</span></div>
+            <div class="row"><button class="btn" data-action="preflight">只查采集条件</button><button class="btn primary" data-action="status">体检</button></div></div>
+          <dl class="info grid2" id="card-info"></dl>
+        </div>
+        <div class="set-block">
+          <div class="set-row"><div><b>参数</b><span class="fine">停止采集时写入，断电恢复</span></div></div>
+          <div class="row">
+            <select id="card-name" class="grow" title="CameraWidth 16384 = 全宽；CameraHeight = 每块行数；ClConfiguration 0 Base / 4 EightyBit；DeviceTapGeometry 3 = 3 Tap"><option>CameraWidth</option><option>CameraHeight</option><option>DeviceTapGeometry</option><option>ClConfiguration</option><option>CameraScanType</option></select>
+            <input id="card-value" type="number" value="16384" min="0">
+            <button class="btn" id="card-set">写入</button>
+          </div>
+        </div>
+        <div class="set-block"><div class="set-row"><div><b>采集卡 XML</b><span class="fine">读取到电脑，只读</span></div><button class="btn" data-action="card_xml">导出</button></div></div>
       </section>
-      <section class="panel observation"><div class="section-title"><h2>当前观察</h2><span id="observed-at">尚无本次实测</span></div>
-        <div id="state-message" class="state-message"><div class="state-icon">◎</div><h3>离线也可以开始了解项目</h3><p>阅读核心代码、查看历史记录，或导入本地 PGM 图像。接上板子后再执行硬件操作。</p><button class="text-button" data-go="source">查看代码入口 →</button></div>
-        <dl class="readings">
-          <div><dt>Camera Link 模式</dt><dd id="cl-mode">Base 模式 (单缆 Port 0)</dd></div>
-          <div><dt>传感器 / 几何</dt><dd id="camera-geo">4096 × 2000 (16K 线扫 / 4K ROI)</dd></div>
-          <div><dt>像素格式与深度</dt><dd id="format">Mono8 (8-bit 灰度)</dd></div>
-          <div><dt>CL1 像素时钟</dt><dd id="clock">—</dd></div>
-          <div><dt>板载 DDR 状态</dt><dd id="ddr">—</dd></div>
-          <div><dt>PCIe 硬件</dt><dd id="pci-hw">0x4c54:0x3000 · C2H0</dd></div>
-          <div><dt>接收程序</dt><dd id="prepared">尚未加载</dd></div>
-          <div><dt>本地存储目录</dt><dd id="local-dir" title="D:\SG3000_Captures">D:\SG3000_Captures</dd></div>
-        </dl>
-        <div class="inline-note">相机物理为 16K 线扫，卡目前报告的宽度是 4096（原因待查，见 verify/V2）。回传的图存到上面「本地存储目录」；网口配置好后走网口，否则走 USB 串口。</div>
+
+      <section class="set-sec" id="sec-driver">
+        <h2>驱动与程序</h2>
+        <div class="set-block">
+          <div class="set-row"><div><b>DMA 模式</b><span class="fine" id="driver-state">未知</span></div>
+            <div class="seg"><button id="driver-slow" title="每次 DMA 64 KiB">标准</button><button id="driver-fast" title="每次 DMA 1 MiB，为 15 kHz 连续采集准备">快速</button></div></div>
+          <p class="fine">切换会重新加载驱动，并同时放开相机串口。</p>
+        </div>
+        <div class="set-block">
+          <div class="set-row"><div><b>板上程序</b><span class="fine" id="prepared">尚未加载</span></div>
+            <button class="btn" data-action="prepare" title="SD 卡只读挂载，拷到板上内存后校验版本">从 SD 卡重新加载</button></div>
+        </div>
+        <div class="set-block">
+          <div class="set-row"><div><b>卸载驱动</b><span class="fine">释放采集卡</span></div><button class="btn danger" data-action="release">卸载</button></div>
+        </div>
+      </section>
+
+      <section class="set-sec" id="sec-network">
+        <h2>网络</h2>
+        <div class="set-block">
+          <div class="set-row"><div><b>板子 → 电脑</b><span class="fine" id="net-state">未配置，回传走串口</span></div></div>
+          <div class="row">
+            <label class="field grow">电脑 IP<input id="net-pc" placeholder="192.168.1.10" autocomplete="off"></label>
+            <label class="field grow">板子 IP<input id="net-board" placeholder="已配置可留空" autocomplete="off"></label>
+            <button class="btn primary" id="net-setup">配置并测试</button>
+          </div>
+          <p class="fine">网线直连，电脑网卡先设成上面的固定 IP。配置后回传一帧约 1 秒。</p>
+        </div>
+      </section>
+
+      <section class="set-sec" id="sec-diag">
+        <h2>诊断</h2>
+        <div class="set-block">
+          <div class="set-row"><div><b>一键上板测试</b><span class="fine">约 4–6 分钟 · 结果包存到电脑 board-session 文件夹</span></div><button class="btn primary" data-action="board_session">开始</button></div>
+          <p class="fine">依次：切 Base 3 Tap → 测试图 → 实拍 → 10 kHz 连续（两种 DMA）→ 15 kHz → CPU 基准。实拍时保持场景不动、画面有亮有暗。</p>
+        </div>
+        <div class="set-block">
+          <div class="set-row"><div><b>CPU 处理速度</b><span class="fine">不碰采集卡 · 约 10 秒 · 倍数 ≥ 1 表示单核跟得上 15 kHz</span></div><button class="btn" data-action="bench">运行</button></div>
+          <table class="data"><thead><tr><th>环节</th><th>MB/s</th><th>相对 15 kHz</th><th></th></tr></thead><tbody id="bench-table"><tr><td colspan="4" class="fine">尚未运行</td></tr></tbody></table>
+        </div>
+        <div class="set-block">
+          <div class="set-row"><div><b>日志</b><span class="fine">每次操作的命令与回显也存在电脑的 runtime 文件夹</span></div>
+            <div class="row"><button class="btn" data-action="dmesg">读取内核日志</button><button class="btn" id="log-open">打开日志面板</button></div></div>
+        </div>
+      </section>
+
+      <section class="set-sec" id="sec-prefs">
+        <h2>偏好</h2>
+        <div class="set-block">
+          <div class="set-row"><div><b>外观</b></div>
+            <div class="seg" id="theme-seg"><button data-theme-value="dark">深色</button><button data-theme-value="light">浅色</button><button data-theme-value="system">跟随系统</button></div></div>
+        </div>
+        <div class="set-block">
+          <div class="set-row"><div><b>单帧后自动保存到电脑</b><span class="fine">没有网口时每帧约 7 分钟，建议关闭</span></div><label class="switch"><input type="checkbox" id="snap-fetch"><i></i></label></div>
+          <div class="set-row"><div><b>存图目录</b><span class="fine mono path" id="local-dir">—</span></div></div>
+        </div>
+        <div class="set-block">
+          <div class="set-row"><div><b>本机服务</b><span class="fine">关闭后需要重新从桌面入口启动</span></div><button class="btn danger" id="shutdown">关闭服务</button></div>
+        </div>
+      </section>
+
+      <section class="set-sec" id="sec-guide">
+        <h2>从上电到对好焦</h2>
+        <ol class="guide-list">
+          <li><b>连接</b><p>板子用 SD 卡启动，J83 接电脑。右上角「设备」选 Linux 控制台对应的串口 → 连接。看到登录界面或 U-Boot 时先用串口工具登录 root。</p></li>
+          <li><b>初始化</b><p>「设备」面板点「一键初始化」：唤醒终端 → 检查板卡 → 从 SD 卡加载程序和驱动 → 体检；相机还在双线模式时自动切到 Base 3 Tap / 16384。SD 卡根目录要有最新的 <span class="mono">glass-capture</span> 文件夹。</p></li>
+          <li><b>验证链路</b><p>相机属性 → 高级 → 测试图选「水平渐变」，点「单帧」：线轮廓是整齐的锯齿、8 个位全亮即链路正常。之后切回「关闭」。</p></li>
+          <li><b>调亮度</b><p>点「实时」。先加光、开光圈，再调曝光时间（不超过一行的时间）、数字位移、TDI。背景灰度 150–200、无饱和。</p></li>
+          <li><b>对焦与调平</b><p>放一条与扫描线垂直的黑白直边，拧对焦环使锐度最大、边缘宽度 ≤ 2 px；再换横跨视场的刻度尺，看 8 段锐度是否等高。两面都要检，最后把焦点推到玻璃厚度中间（1 mm 玻璃约 0.33 mm）。</p></li>
+          <li><b>平场校正</b><p>镜头、光源、行频、增益确定后：相机属性 → 平场校正，选用户组 → 暗场 → 亮场 → 启用。不保存，断电要重做。</p></li>
+          <li><b>连续运行</b><p>设置 → 驱动与程序切到「快速」DMA，再到「连续运行」开始。吞吐需达到 246 MB/s，且无队列满、无块号不连续。</p></li>
+        </ol>
+        <p class="fine">完整步骤和排查见仓库 docs/BRINGUP.md。所有修改只改运行时的值，中控台不提供保存到相机的入口。</p>
+      </section>
+
+      <section class="set-sec wide" id="sec-source">
+        <h2 id="source-title">源代码</h2>
+        <div class="source-layout">
+          <div class="source-files" id="source-files"></div>
+          <div class="source-main">
+            <div class="source-meta"><span class="fine mono" id="source-path"></span><button class="btn xs" id="copy-path">复制路径</button></div>
+            <p class="fine" id="source-guide"></p>
+            <div class="code-scroll" id="code-scroll"><pre id="code"></pre></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="set-sec" id="sec-history">
+        <h2>历史记录</h2>
+        <div class="timeline">
+          <article><time>2026-11-14</time><div><b>第一次采到 16384 宽的图</b><p>相机与采集卡切到 Base 3 Tap，16384 × 2000 单帧与 10 kHz 连续流通过。</p><button class="btn xs ghost" data-file="flow">采集流程代码</button></div></article>
+          <article><time>2026-10-23</time><div><b>SD 卡恢复入口</b><p>接收程序、驱动与 resume.sh 写入 sg3000-linux-20261023，校验通过。</p><button class="btn xs ghost" data-file="saved">保存记录</button></div></article>
+          <article><time>2026-10-23</time><div><b>Linux 与采集卡</b><p>Linux 5.15.19-xilinx-v2022.1 启动；PCIe 识别 4c54:3000；驱动加载、卸载、再加载通过。</p><button class="btn xs ghost" data-file="history">上板日志</button></div></article>
+        </div>
+      </section>
+
+      <section class="set-sec" id="sec-about">
+        <h2>关于</h2>
+        <div class="set-block">
+          <dl class="info grid2">
+            <div><dt>版本</dt><dd>中控台 1.1</dd></div>
+            <div><dt>硬件</dt><dd>ZCU102 · SG3000 · SW-WS2-CL16K</dd></div>
+            <div class="wide"><dt>工程目录</dt><dd id="project-root">—</dd></div>
+          </dl>
+        </div>
       </section>
     </div>
-    <section class="panel stream-panel"><div class="section-title"><h2>连续接收与处理 · v0.2</h2><span class="chip amber" id="stream-badge">等待验证</span></div>
-      <div class="stream-form"><label>运行时长<select id="stream-seconds"><option value="30">30 秒</option><option value="60">60 秒</option><option value="300">5 分钟</option><option value="0">直到主动停止</option></select></label><label>处理后端<select id="stream-processor"><option value="stats">CPU 灰度统计 · 调试用途</option><option value="candidates">颗粒候选检测 · 第一版</option></select></label><button data-action="prepare_stream" disabled>加载连续程序</button><button id="start-stream" class="primary" disabled>开始连续接收</button><button id="replay">离线结果回放</button></div>
-      <div class="stream-metrics"><div><small>已处理图像块</small><strong id="stream-count">—</strong></div><div><small>当前块编号 / 尺寸</small><strong id="stream-block">—</strong></div><div><small>灰度范围 / 均值</small><strong id="stream-gray">—</strong></div><div><small>检测结论</small><strong id="stream-decision">尚无检测算法</strong></div></div>
-      <p class="stream-summary" id="stream-summary">接收与处理并行，队列满时停止并报告。灰度统计不作合格／缺陷判定；本次先向中控台输出。</p>
-      <div class="inline-note">连续程序在「从 SD 加载程序」时已一起拷贝。选「颗粒候选检测」且网口已配置时，每块的候选坐标存到采集目录的 candidates 子目录。连续模块尚未上板验证。<button class="text-button" data-file="guide">上板步骤 →</button></div>
-    </section>
-    <section class="panel terminal-panel"><div class="section-title"><div class="terminal-heading"><h2>操作与串口日志</h2><span id="terminal-status">串口未连接</span></div><div class="terminal-tools"><label><input id="autoscroll" type="checkbox" checked> 跟随日志</label><button id="export">导出本次日志</button><button id="interrupt" class="danger" disabled>中断操作</button></div></div><pre id="terminal" tabindex="0" aria-label="串口原始日志"></pre><div class="terminal-foot">日志保存在本机 runtime 文件夹。中断请求不等于 DMA 已停止；以程序返回与日志为准。</div></section>
-    <section class="panel image-panel"><div class="section-title"><div><h2>图像查看器</h2><p>本地存储于 D:\SG3000_Captures。采集或回传后自动显示，亦可手动导入。</p></div><div style="display:flex;gap:8px;align-items:center;"><button id="view-latest-btn" style="font-size:12px;" disabled>显示最新采集图</button><label class="file-button">导入 PGM<input id="pgm" type="file" accept=".pgm"></label></div></div><div id="image-empty" class="image-empty"><span>▧</span><p>等待完整图像</p><small id="image-empty-sub">采集成功后图像将自动保存到 D:\SG3000_Captures 并在下方显示。</small></div><canvas id="image" hidden></canvas><div id="image-info" class="image-info"></div><div id="board-frame" class="inline-note" hidden></div></section>
-  </section>
-  <section id="source" class="view"><div class="title-row"><div><div class="eyebrow">SOURCE EXPLORER</div><h1>代码有入口，也有路径。</h1><p class="subtitle">核心工程独立存放。先读主程序，再看采集流程，最后深入驱动。</p></div><span class="chip">只读源码浏览</span></div><div class="source-layout"><aside class="panel source-files" id="source-files"></aside><section class="panel code-panel"><div class="code-title"><h2 id="source-title">应用入口</h2><button id="copy-path">复制完整路径</button></div><p id="source-guide" class="code-guide"></p><div class="code-location" id="source-path"></div><div class="code-scroll" id="code-scroll"><pre id="code"></pre></div></section></div></section>
-  <section id="history" class="view"><div class="title-row"><div><div class="eyebrow">EVIDENCE / 2026.10.23</div><h1>做过什么，证据在哪里。</h1><p class="subtitle">以下全部是历史记录，和本次连接状态分开显示。</p></div><span class="chip amber">历史快照</span></div><div class="history-grid"><article class="panel history-card"><span class="history-index">01 / 已验证</span><h2>Linux 与采集卡</h2><p>Linux 5.15.19-xilinx-v2022.1 启动；PCIe 识别 4c54:3000。自制驱动成功加载、卸载并再次加载。</p><button data-file="history">打开上板日志 →</button></article><article class="panel history-card"><span class="history-index">02 / 已保存</span><h2>SD 卡上的恢复入口</h2><p>接收程序、驱动及 resume.sh 写入 sg3000-linux-20261023。校验与重新挂载读回均通过，随后卸载 SD 和驱动。</p><button data-file="saved">打开保存记录 →</button></article><article class="panel history-card pending"><span class="history-index">03 / 待硬件验证</span><h2>真正搬回一帧图像</h2><p>相机维修中。此前 CL1 未锁定，DDR 状态为 2；未获得有效帧头，没有执行真实图像 DMA。DDR=2 的含义仍需核实。</p><button data-file="flow">看看流程停在哪里 →</button></article></div><div class="panel scope"><h2>当前工程边界</h2><p>ZCU102 的 ARM/Linux 控制 SG3000；采集卡负责 Camera Link。尚未新增 ZCU102 PL 采集电路。历史上板基线是端口 0、Base、Mono8、无填充、单帧。v0.2 连续逻辑已通过离线验证，尚未上板。此前的模拟测试验证了软件处理逻辑，不能替代相机与 DMA 的实测。</p></div></section>
-  <section id="guide" class="view"><div class="title-row"><div><div class="eyebrow">OPERATOR'S GUIDE</div><h1>从连接到第一帧。</h1><p class="subtitle">现在可以离线阅读。回到实验室后按步骤操作。</p></div></div><div class="guide-grid"><article class="panel"><h2>01 / 连接</h2><p>板子由 SD 卡启动，J83 接电脑。刷新串口，选择 CP2108 的 Linux 控制台端口；过去为 COM10，但端口号可能变化。</p><p>先关闭其他占用此端口的串口软件，再点连接与唤醒。看到 root 提示符后执行检查板卡。</p></article><article class="panel"><h2>02 / 准备</h2><p>检查板卡通过后，从 SD 卡加载已验证的程序。此步骤只读挂载 SD，拷入板上临时目录并加载驱动，不修改启动文件。</p><p>若出现登录界面或 U-Boot 提示符，暂不发自动命令；先用串口工具完成 Linux 登录。</p></article><article class="panel"><h2>03 / 检查与采集</h2><p>相机供电、接线恢复后，检查采集条件。只有条件满足才尝试单帧采集。失败时保留日志，按阶段定位。</p><p>图像暂存在板子 /tmp，断电会消失。本版支持导入本地 PGM 查看，未实现大图自动回传与视频流。</p></article><article class="panel"><h2>04 / 阅读与维护</h2><p>core 是核心源码，board 是此前验证过的板上文件，console 是中控台。编译结果进入 build/output，不自动覆盖 board。</p><p>当前工程独立于旧调试目录。旧测试与逆向记录保留在原处，日常操作无需翻找它们。</p></article></div><div class="panel scope"><h2>和我一起调试时</h2><p>告诉我具体操作和界面提示，或导出本次日志。每条操作都记录命令与返回内容；需要深入时，可以直接在“核心代码”中找到对应函数。</p><button data-file="guide">打开完整说明 →</button><p id="project-root" class="path-note"></p></div></section>
-  <footer><span>SG3000 WORKBENCH</span><span>控制在板上，过程在眼前。</span><button id="shutdown">关闭本机服务</button></footer>
-</main>
+  </div>
+</div>
+
+<!-- 确认对话框 -->
+<div class="overlay" id="modal" hidden>
+  <div class="dialog confirm" role="alertdialog" aria-modal="true" aria-labelledby="modal-title">
+    <h3 id="modal-title"></h3>
+    <p id="modal-text"></p>
+    <div class="row end"><button class="btn" id="modal-cancel">取消</button><button class="btn primary" id="modal-ok">确定</button></div>
+  </div>
+</div>
+
 <div id="toast" role="status" hidden></div>
 <script src="/app.js"></script>
 <script src="/defects.js"></script>

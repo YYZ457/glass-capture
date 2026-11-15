@@ -94,6 +94,11 @@ class Console:
         self.net_frames = deque(maxlen=50)
         self.net_candidates = 0
         self.receiver = None
+        self.camera = {}              # 相机参数（camera-get / camera-set --params 读回的），名字 → dict
+        self.live = {}                # 最近一次"采一帧看轮廓"的结果 + 历史
+        self.live_stop = False
+        self.bench = []               # sg3000-capture bench 的结果
+        self.driver = {}              # cam_serial / dma_fast 当前值
         self.log_path = self.runtime / ('session-' + datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:8] + '.jsonl')
         self.event('system', '中控台已启动。尚未连接设备；历史记录不代表当前状态。')
 
@@ -115,6 +120,7 @@ class Console:
                         identity_ok=self.identity_ok, busy=self.busy, job=self.job,
                         checks=dict(self.checks), last_frame=self.last_frame, seq=self.seq,
                         stream=dict(self.stream), net=dict(self.net), captures=str(CAPTURES),
+                        camera=self.camera, live=self.live, bench=self.bench, driver=self.driver,
                         events=[e for e in self.events if e['seq'] > after]))
 
     def _stream_unknown(self, message):
@@ -284,7 +290,8 @@ class Console:
         return output
 
     def start(self, action, options=None):
-        if action not in {'probe', 'prepare', 'preflight', 'capture', 'fetch_last', 'dmesg', 'release', 'prepare_stream', 'stream', 'replay', 'status', 'network', 'card_xml', 'card_set', 'camera_probe', 'camera_xml', 'camera_regs', 'camera_set', 'board_session'}:
+        if action not in {'probe', 'prepare', 'preflight', 'capture', 'fetch_last', 'dmesg', 'release', 'prepare_stream', 'stream', 'replay', 'status', 'network', 'card_xml', 'card_set', 'camera_probe', 'camera_xml', 'camera_regs', 'camera_set', 'board_session',
+                          'camera_get', 'camera_preset', 'snap', 'live', 'driver', 'bench'}:
             raise ValueError('未知操作。')
         with self.lock:
             if action != 'replay' and (not self.connected or not self.shell_ready):
@@ -306,6 +313,16 @@ class Console:
                 self.card_set_options = self._check_card_set(options)
             if action == 'camera_set':
                 self.camera_set_options = self._check_camera_set(options)
+            if action in {'snap', 'live'}:
+                fetch, count = options.get('fetch', False), options.get('count', 0)
+                if type(fetch) is not bool or type(count) is not int or not 0 <= count <= 10000:
+                    raise ValueError('fetch 必须是 true / false，count 必须是 0..10000（0 = 直到点停止）。')
+                self.snap_options = dict(fetch=fetch, count=count)
+                self.live_stop = False
+            if action == 'driver':
+                if type(options.get('dma_fast')) is not bool:
+                    raise ValueError('dma_fast 必须是 true 或 false。')
+                self.driver_options = dict(dma_fast=options['dma_fast'])
             if action in {'stream', 'replay'}:
                 self.stream = {'channel': 'recorded-replay' if action == 'replay' else 'board', 'status': 'starting'}
                 self.stream_lines = ''
@@ -371,8 +388,21 @@ class Console:
 
     def _status(self):
         """只读体检：驱动信息、预检五项、两个状态寄存器。不启动采集。"""
-        rc, output = self.exchange(STATUS_APP, 15)
+        rc, output = self.exchange(f"{STATUS_APP}; _rc=$?; printf 'CAM_SERIAL='; cat {CAM_SERIAL_PARAM} 2>/dev/null || echo MISSING; "
+                                   f"printf 'DMA_FAST='; cat {DMA_FAST_PARAM} 2>/dev/null || echo MISSING; exit $_rc", 15)
         self._parse_preflight_status(output)
+        self._read_driver_params(output)
+        card = {}
+        for name, value in re.findall(r'^CardParam (\w+)\s+(?:0x[0-9a-f]+ = )?([\d.]+)', output.replace('\r', ''), re.M):
+            card[name] = float(value) if '.' in value else int(value)
+        for key, pattern in (('max_transfer', r'^max_transfer\s+(\d+)'), ('poisoned', r'^poisoned\s+(\d+)'),
+                             ('hdr_ready', r'^SG_HDR_READY\s+(\d+)')):
+            found = re.search(pattern, output.replace('\r', ''), re.M)
+            if found:
+                card[key] = int(found.group(1))
+        if card:
+            with self.lock:
+                self.checks['card'] = card
         if rc == 2:
             raise RuntimeError('打不开采集卡设备（驱动没加载，或被别的程序占用）。')
         if rc == 1:
@@ -747,7 +777,14 @@ class Console:
 
     # 和板上 cam_set_check()（board/camera_ctrl/cam_set.c）一致；锁定条件和曝光上下限由板上按相机当前状态再查一次。
     CAMERA_SET_INTS = {'ClConfiguration': (0, 3), 'DeviceTapGeometry': (2, 3),
-                       'TestPattern': (0, 1, 2, 3, 5), 'AnalogGain': (0, 1, 2, 3, 4)}
+                       'TestPattern': (0, 1, 2, 3, 5), 'AnalogGain': (0, 1, 2, 3, 4),
+                       'DigitalShift': (0, 1, 2, 3, 4), 'TDIStage': (0, 1), 'TDIMode': (0, 1),
+                       'FFCEnable': (0, 1), 'FFCUserSetSelector': (0, 1, 2, 3), 'FFCSampleFrames': (1024, 2048),
+                       'FFCCalTargetMode': (0, 1, 2), 'FFCCalTargetValue': range(0, 251),
+                       'BlackLevel': range(-65536, 65537),          # 真正的范围由板上按相机报的上下限查
+                       # 命令：值只能是 1。永远没有 UserSetSave / FFCUserSetSave。
+                       'FFCCalFPN': (1,), 'FFCCalPRNU': (1,), 'FFCUserSetLoad': (1,)}
+    CAMERA_COMMANDS = ('FFCCalFPN', 'FFCCalPRNU', 'FFCUserSetLoad')
     CAMERA_SET_FLOATS = {'ExposureTime': (0.0, 100000.0), 'DigitalGain': (0.10, 15.99), 'LineRate': (100.0, 200000.0)}
 
     @classmethod
@@ -760,24 +797,236 @@ class Console:
             if (lo < value if name == 'ExposureTime' else lo <= value) and value <= hi:
                 return dict(name=name, value=value, text=f'{value:g}')
         raise ValueError('相机参数不在允许范围：ClConfiguration 0/3，DeviceTapGeometry 2/3（仅 Base），'
-                         'TestPattern 0/1/2/3/5，ExposureTime 微秒，DigitalGain 0.10–15.99，AnalogGain 0–4，LineRate 100–200000 Hz。')
+                         'TestPattern 0/1/2/3/5，ExposureTime 微秒，DigitalGain 0.10–15.99，AnalogGain 0–4，LineRate 100–200000 Hz，'
+                         'DigitalShift 0–4，TDIStage / TDIMode / FFCEnable 0/1，FFCUserSetSelector 0–3，FFCSampleFrames 1024/2048，'
+                         'FFCCalTargetMode 0–2，FFCCalTargetValue 0–250，BlackLevel 整数，命令 FFCCalFPN / FFCCalPRNU / FFCUserSetLoad 只能是 1。')
+
+    @staticmethod
+    def _parse_camera_params(output):
+        """把板上 CameraParam 行变成 {名字: {raw, value, min, max, unit, locked, error}}。"""
+        params = {}
+        for name, rest in re.findall(r'^CameraParam (\w+) ([^\r\n]*)', output.replace('\r', ''), re.M):
+            item = {}
+            for key, text in re.findall(r'(\w+)=(\S+)', rest):
+                if key in ('value', 'min', 'max'):
+                    try: item[key] = float(text)
+                    except ValueError: pass
+                elif key == 'raw':
+                    try: item[key] = int(text, 0)
+                    except ValueError: pass
+                elif key == 'locked':
+                    item[key] = text == '1'
+                else:
+                    item[key] = text
+            params[name] = item
+        return params
+
+    def _store_camera_params(self, output):
+        params = self._parse_camera_params(output)
+        if params:
+            with self.lock:
+                self.camera = dict(params=params, at=datetime.now().isoformat(timespec='seconds'),
+                                   partial='CameraParamAbort' in output)
+        return params
+
+    def _camera_get(self):
+        """只读：一次读出相机当前全部常用参数（曝光、行频、增益、输出模式、平场校正、TDI……）。"""
+        self._ensure_cam_serial()
+        rc, output = self.exchange(f"{APP} camera-get 2>&1", 90)
+        params = self._store_camera_params(output)
+        if rc or not params:
+            raise RuntimeError('没读到相机参数：' + output[-400:] + '。确认相机已上电、第一根 Camera Link 线已接。')
+        bad = [n for n, v in params.items() if 'error' in v]
+        return f'已读相机参数 {len(params)} 项' + (f'（{len(bad)} 项读不出：{"、".join(bad)}）' if bad else '') + '。只读，没有改动相机。'
 
     def _camera_set(self):
-        """写相机的 Camera Link 输出模式（不保存，相机断电恢复）。写后读回核对。"""
+        """写相机的一个运行时参数，或发一个校正命令（都不保存，相机断电恢复）。写后读回核对，并刷新参数表。"""
         o = self.camera_set_options
         self._ensure_cam_serial()
-        rc, output = self.exchange(f"{APP} camera-set {o['name']} {o['text']} 2>&1", 30)
+        command = o['name'] in self.CAMERA_COMMANDS
+        rc, output = self.exchange(f"{APP} camera-set {o['name']} {o['text']} --params 2>&1", 120 if command else 90)
+        self._store_camera_params(output)
+        if command:
+            sent = re.search(r'CameraCommand (\w+) 0x[0-9a-f]+: sent, camera answered again after about (\d+) ms', output)
+            if rc or not sent:
+                raise RuntimeError('相机命令没执行：' + output[-500:])
+            what = {'FFCCalFPN': '暗场校正（FPN）', 'FFCCalPRNU': '亮场校正（PRNU）', 'FFCUserSetLoad': '重新载入已存的平场校正数据'}[o['name']]
+            return f"相机已执行{what}，约 {int(sent.group(2)) / 1000:.1f} 秒后恢复应答。校正结果只在相机内存里，断电恢复原样。采一帧看轮廓是否变平。"
         done = re.search(r'CameraSet (\w+) 0x[0-9a-f]+: (\d+) -> (\d+), readback (\d+)', output)
         if rc or not done:
-            raise RuntimeError('相机参数没写成：' + output[-400:])
+            raise RuntimeError('相机参数没写成：' + output[-500:])
         state = re.search(r'CameraState ClConfiguration=(\d+).*?DeviceTapGeometry=(\d+)', output)
         old, _, back = (int(x) for x in done.groups()[1:])
         mode = {0: 'Base', 3: 'EightyBit'}
         now = (f"相机现在 ClConfiguration={state.group(1)}（{mode.get(int(state.group(1)), '?')}）、"
                f"DeviceTapGeometry={state.group(2)}。") if state else ''
         value = re.search(r'CameraValue \w+ = ([^\r\n]*)', output)
+        tail = '采集卡要改成同样的模式（见 BRINGUP 第 5¾ 节）；' if o['name'] in ('ClConfiguration', 'DeviceTapGeometry') else ''
         return (f"相机 {o['name']}：{old} → {back}（已读回确认" + (f"，= {value.group(1)}" if value else '') + "）。" + now +
-                '采集卡要改成同样的模式（见 BRINGUP 第 5¾ 节）；相机断电后恢复 EightyBit。')
+                tail + '没有保存，相机断电后恢复。')
+
+    def _camera_preset(self):
+        """B 方案一键配置：相机和采集卡都切到 Base 3 Tap、宽 16384（单线），然后体检。都不保存。"""
+        self._ensure_cam_serial()
+        for name, value in (('ClConfiguration', 0), ('DeviceTapGeometry', 3)):
+            rc, output = self.exchange(f"{APP} camera-set {name} {value}" + (' --params' if name == 'DeviceTapGeometry' else '') + " 2>&1", 90)
+            self._store_camera_params(output)
+            if rc or not re.search(r'CameraSet ' + name + r' 0x[0-9a-f]+: \d+ -> \d+, readback ' + str(value), output):
+                raise RuntimeError(f'相机 {name} 没写成：' + output[-400:])
+        rc, output = self.exchange(f"{APP} card-set CameraWidth 16384 2>&1", 15)
+        if rc or not re.search(r'CardSet CameraWidth 0x[0-9a-f]+: \d+ -> 16384, readback 16384', output):
+            raise RuntimeError('采集卡 CameraWidth 没写成：' + output[-400:])
+        self._status()
+        return '相机和采集卡都已切到 Base 3 Tap、宽 16384，体检通过。没有保存：相机或板子断电后要重做一次。'
+
+    # ---- 采一帧 / 实时调试：采图后在板上算亮度、线轮廓和对焦指标，只把这些数字传回来 ----
+    LIVE_BINS = 256
+
+    @staticmethod
+    def _parse_snapshot(output):
+        text = output.replace('\r', '')
+        stats = re.search(r'PGMStats \S+ (\d+)x(\d+) min=(\d+) max=(\d+) mean=([\d.]+) p1=(\d+) p50=(\d+) p99=(\d+) saturated=(\d+)', text)
+        if not stats:
+            return None
+        w, h, lo, hi, mean, p1, p50, p99, sat = stats.groups()
+        data = dict(width=int(w), height=int(h),
+                    stats=dict(min=int(lo), max=int(hi), mean=float(mean), p1=int(p1), p50=int(p50), p99=int(p99), saturated=int(sat)))
+        bits = re.search(r'PGMBits OR=0x([0-9a-f]+) missing=(\S+)', text)
+        if bits:
+            data['bits'] = dict(seen=int(bits.group(1), 16), missing=bits.group(2))
+        head = re.search(r'PGMProfile bins=(\d+) width=(\d+) scale=(\d+)', text)
+        if head:
+            bins, scale = int(head.group(1)), int(head.group(3))
+            profile = dict(bins=bins, width=int(head.group(2)))
+            for key, tag in (('mean', 'PGMProfileMean'), ('min', 'PGMProfileMin'), ('max', 'PGMProfileMax')):
+                values = []
+                for row in re.findall(r'^' + tag + r' \d+:([ \d]*)$', text, re.M):
+                    values.extend(int(v) / scale for v in row.split())
+                if len(values) != bins:
+                    profile = None
+                    break
+                profile[key] = values
+            if profile:
+                data['profile'] = profile
+        focus = re.search(r'PGMFocus sharpness=([\d.]+) contrast=([\d.]+) edge=(\w+)(?: x=(\d+) width_px=([\d.]+) edge_contrast=([\d.]+))?', text)
+        if focus:
+            data['focus'] = dict(sharpness=float(focus.group(1)), contrast=float(focus.group(2)),
+                                 edge=dict(x=int(focus.group(4)), width_px=float(focus.group(5)), contrast=float(focus.group(6)))
+                                 if focus.group(3) == 'found' else None)
+            seg = re.search(r'^PGMFocusSeg((?: [\d.]+)+)$', text, re.M)
+            if seg:
+                data['focus']['segments'] = [float(v) for v in seg.group(1).split()]
+        return data
+
+    def _snap_once(self, name):
+        """板上采一帧到 name，算统计 / 轮廓 / 对焦指标，更新 self.live。返回 (板上路径, 解析结果)。"""
+        path = BOARD_CAPTURES + '/' + name
+        rc, output = self.exchange(f"mkdir -p {BOARD_CAPTURES} && {APP} capture --timeout-ms 10000 --output {path}", 30)
+        self._parse_preflight(output, rc)
+        saved = re.search(r'Saved complete Mono8 frame: (\d+) x (\d+), (\d+) bytes', output)
+        if rc or not saved:
+            raise RuntimeError('未确认生成完整图像。请查看采集和停止日志。')
+        w, h, n = (int(v) for v in saved.groups())
+        with self.lock:
+            self.last_frame = dict(name=name, path=path, location='board-ram', size_bytes=n,
+                                   at=datetime.now().isoformat(timespec='seconds'), width=w, height=h)
+        rc, output = self.exchange(f"{APP} pgm-stats {path} --quick --profile {self.LIVE_BINS} 2>&1", 30)
+        data = None if rc else self._parse_snapshot(output)
+        if not data:
+            raise RuntimeError('图已采到，但板上统计失败（板上程序可能是旧版，没有 --profile）：' + output[-300:])
+        now = datetime.now().isoformat(timespec='seconds')
+        with self.lock:
+            history = list(self.live.get('history', []))[-119:]
+            focus = data.get('focus') or {}
+            history.append(dict(at=now, sharpness=focus.get('sharpness'), mean=data['stats']['mean'], max=data['stats']['max'],
+                                edge_width=(focus.get('edge') or {}).get('width_px')))
+            self.live = dict(data, name=name, at=now, count=self.live.get('count', 0) + 1, history=history,
+                             running=self.live.get('running', False))
+        return path, data
+
+    @staticmethod
+    def _snapshot_text(data):
+        st, focus = data['stats'], data.get('focus') or {}
+        edge = focus.get('edge')
+        return (f"{data['width']} × {data['height']}，灰度 {st['min']}–{st['max']}，均值 {st['mean']:.1f}"
+                + (f"，饱和 {st['saturated']} 个像素" if st['saturated'] else '')
+                + (f"；最强边缘 {edge['width_px']:.2f} 像素（x = {edge['x']}）" if edge else '；画面里没有明显的边缘'))
+
+    def _snap(self):
+        """采一帧：统计、轮廓、对焦指标马上显示；fetch=True 时再把整张图传回电脑。"""
+        name = 'frame-' + datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:6] + '.pgm'
+        _, data = self._snap_once(name)
+        text = '采到一帧：' + self._snapshot_text(data) + '。'
+        if self.snap_options['fetch']:
+            return text + self._fetch_last()
+        return text + '图在板上内存里，需要看整张图再点「保存到电脑」。'
+
+    def stop_live(self):
+        """请求实时调试在当前这一帧采完后停下（不发 Ctrl+C，不会打断正在进行的采集）。"""
+        with self.lock:
+            if not self.busy or not self.job or self.job.get('action') != 'live':
+                raise ValueError('实时调试没有在运行。')
+            self.live_stop = True
+        self.event('system', '已请求停止实时调试：当前这一帧采完就停。')
+
+    def clear_live_history(self):
+        """清空对焦曲线（换了靶标、重新开始对焦时用）。"""
+        with self.lock:
+            if self.live:
+                self.live = dict(self.live, history=[])
+
+    def _live(self):
+        """实时调试：反复"采一帧 → 板上算轮廓和对焦指标"，直到点停止。每帧约 2–4 秒（走串口，只传数字不传图）。"""
+        limit, done, previous = self.snap_options['count'], 0, None
+        with self.lock:
+            self.live = dict(self.live, running=True)
+        try:
+            while not self.live_stop and not self.cancel.is_set() and (not limit or done < limit):
+                path, _ = self._snap_once(f"live-{datetime.now().strftime('%H%M%S')}-{done:04d}.pgm")
+                if previous:
+                    self.exchange(f"rm -f {previous}", 10)        # 只留最新一帧，免得占满板上内存
+                previous, done = path, done + 1
+        finally:
+            with self.lock:
+                self.live = dict(self.live, running=False)
+        return f'实时调试结束，共 {done} 帧。最后一帧留在板上，可以「保存到电脑」。'
+
+    def _driver(self):
+        """重新加载驱动，选择 DMA 模式（dma_fast=1：1 MiB 缓存缓冲区；否则 64 KiB 旧模式）。相机串口一并放开。"""
+        fast = self.driver_options['dma_fast']
+        rc, output = self.exchange(f"if [ -d /sys/module/sg3000_rx ]; then rmmod sg3000_rx || exit 9; fi; "
+                                   f"insmod {BOARD_DIR}/sg3000_rx.ko cam_serial=1{' dma_fast=1' if fast else ''} && test -e {DEV_NODE} && "
+                                   f"printf 'CAM_SERIAL='; cat {CAM_SERIAL_PARAM}; printf 'DMA_FAST='; cat {DMA_FAST_PARAM} 2>/dev/null || echo MISSING; "
+                                   f"dmesg | tail -n 3", 30)
+        self._read_driver_params(output)
+        if rc:
+            raise RuntimeError('驱动没有加载成功：' + output[-500:])
+        if fast and self.driver.get('dma_fast') != 'Y':
+            raise RuntimeError('驱动已加载，但快速 DMA 没有生效（这份 sg3000_rx.ko 没有 dma_fast 参数，或 2 MiB 缓冲区申请不到）。现在是旧模式。')
+        self.checks['prepared'] = True
+        return f"驱动已重新加载：相机串口已放开，DMA {'快速模式（1 MiB）' if fast else '旧模式（64 KiB）'}。"
+
+    def _read_driver_params(self, output):
+        text = output.replace('\r', '')
+        cam = re.search(r'^CAM_SERIAL=(\S*)', text, re.M)
+        fast = re.search(r'^DMA_FAST=(\S*)', text, re.M)
+        if cam or fast:
+            with self.lock:
+                self.driver = dict(cam_serial=cam.group(1) if cam else '', dma_fast=fast.group(1) if fast else '',
+                                   at=datetime.now().isoformat(timespec='seconds'))
+
+    def _bench(self):
+        """板上 CPU 基准（不碰采集卡）：各处理环节一个核的速度，是 15 kHz 数据率的多少倍。"""
+        rc, output = self.exchange(f"{APP} bench 2>&1", 180)
+        rows = [dict(name=n, ms=float(ms), mbps=float(mbps), x15k=float(x), extra=extra.strip())
+                for n, ms, mbps, x, extra in re.findall(r'^Bench name=(\w+) ms=([\d.]+) MBps=([\d.]+) x15k=([\d.]+)([^\r\n]*)', output.replace('\r', ''), re.M)]
+        if rc or not rows:
+            raise RuntimeError('基准没有跑出来（板上程序可能是旧版）：' + output[-300:])
+        with self.lock:
+            self.bench = rows
+        slow = [r['name'] for r in rows if r['x15k'] < 1]
+        return 'CPU 基准完成：' + '；'.join(f"{r['name']} {r['mbps']:.0f} MB/s（{r['x15k']:.2f}×）" for r in rows) + \
+               ('。一个核跟不上 15 kHz 的环节：' + '、'.join(slow) if slow else '。各环节一个核都跟得上 15 kHz') + '。'
 
     @staticmethod
     def _check_net_options(options):

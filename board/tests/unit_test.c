@@ -289,12 +289,15 @@ static void test_cam_manifest(void)
 static void test_cam_set(void)
 {
     /* Base、曝光 1..93.75 µs、行周期 5900..960000 时钟（约 100 Hz..16.27 kHz）、内触发 */
-    struct cam_set_state base = { 0, CAM16K_MONO8, 0, 96, 9000, 5900, 960000, 0 };
-    struct cam_set_state deca = { 3, CAM16K_MONO8, 0, 96, 9000, 5900, 960000, 0 };
+    struct cam_set_state base = { .cl_config = 0, .pixel_format = CAM16K_MONO8, .exposure_min_clk = 96,
+                                  .exposure_max_clk = 9000, .line_period_min_clk = 5900, .line_period_max_clk = 960000 };
+    struct cam_set_state deca = base;
     uint32_t raw = 0;
     const char *why;
 
+    deca.cl_config = 3;
     assert(cam_set_address("UserSetSave") == 0 && cam_set_address("TestPattern") == CAM16K_TEST_PATTERN);
+    assert(cam_set_address("FFCUserSetSave") == 0 && cam_set_address("DeviceReset") == 0);   /* 永远不放开 */
     assert(cam_set_check("ClConfiguration", "0", &deca, &raw, &why) == 0 && raw == 0);
     assert(cam_set_check("ClConfiguration", "4", &deca, &raw, &why) == -EPERM);   /* 相机的 EightyBit 是 3 */
     assert(cam_set_check("DeviceTapGeometry", "3", &base, &raw, &why) == 0 && raw == 3);
@@ -335,6 +338,52 @@ static void test_cam_set(void)
         trig.line_trigger_mode = 1;
         assert(cam_set_check("LineRate", "15000", &trig, &raw, &why) == -EPERM);          /* 外触发时锁定 */
     }
+    /* 位移、TDI、黑电平 */
+    assert(cam_set_check("DigitalShift", "2", &base, &raw, &why) == 0 && raw == 2);
+    assert(cam_set_check("DigitalShift", "5", &base, &raw, &why) == -EPERM);
+    assert(cam_set_check("TDIStage", "1", &base, &raw, &why) == 0 && raw == 1);
+    assert(cam_set_check("TDIStage", "2", &base, &raw, &why) == -EPERM);
+    assert(cam_set_check("TDIMode", "1", &base, &raw, &why) == 0 && cam_set_check("TDIMode", "2", &base, &raw, &why) == -EPERM);
+    {
+        struct cam_set_state black = base;
+        assert(cam_set_check("BlackLevel", "0", &black, &raw, &why) == 0 && raw == 0);     /* 范围 0..0 */
+        black.black_min = -64; black.black_max = 63;
+        assert(cam_set_check("BlackLevel", "-5", &black, &raw, &why) == 0 && raw == 0xfffffffbu);
+        assert(cam_set_check("BlackLevel", "64", &black, &raw, &why) == -EPERM);
+        assert(cam_set_check("BlackLevel", "-65", &black, &raw, &why) == -EPERM);
+        assert(cam_set_check("BlackLevel", "1.5", &black, &raw, &why) == -EINVAL);
+        black.black_min = 5; black.black_max = 1;
+        assert(cam_set_check("BlackLevel", "3", &black, &raw, &why) == -EPERM);            /* 相机给的范围不成立 */
+    }
+    /* 平场校正：开关、选组、目标；两个校正命令要先选到用户组 1..3，且不能镜像 */
+    assert(cam_set_check("FFCEnable", "1", &base, &raw, &why) == 0 && raw == 1);
+    assert(cam_set_check("FFCEnable", "2", &base, &raw, &why) == -EPERM);
+    assert(cam_set_check("FFCUserSetSelector", "3", &base, &raw, &why) == 0 && cam_set_check("FFCUserSetSelector", "4", &base, &raw, &why) == -EPERM);
+    assert(cam_set_check("FFCSampleFrames", "2048", &base, &raw, &why) == 0 && raw == 2048);
+    assert(cam_set_check("FFCSampleFrames", "512", &base, &raw, &why) == -EPERM);
+    assert(cam_set_check("FFCCalTargetMode", "2", &base, &raw, &why) == 0 && cam_set_check("FFCCalTargetMode", "3", &base, &raw, &why) == -EPERM);
+    assert(cam_set_check("FFCCalTargetValue", "180", &base, &raw, &why) == -EPERM && why);  /* 目标模式不是 2 */
+    assert(!cam_set_is_command("FFCEnable") && cam_set_is_command("FFCCalFPN") && cam_set_is_command("FFCCalPRNU") &&
+           cam_set_is_command("FFCUserSetLoad") && !cam_set_is_command("nonsense"));
+    assert(cam_set_check("FFCCalFPN", "1", &base, &raw, &why) == -EPERM && why);            /* 出厂组：锁定 */
+    assert(cam_set_check("FFCUserSetLoad", "1", &base, &raw, &why) == 0 && raw == 1);
+    assert(cam_set_check("FFCUserSetLoad", "0", &base, &raw, &why) == -EPERM);
+    {
+        struct cam_set_state ffc = base;
+        ffc.ffc_user_set = 1; ffc.ffc_target_mode = 2;
+        assert(!cam_set_ffc_cal_locked(&ffc));
+        assert(cam_set_check("FFCCalFPN", "1", &ffc, &raw, &why) == 0 && raw == 1);
+        assert(cam_set_check("FFCCalPRNU", "1", &ffc, &raw, &why) == 0 && raw == 1);
+        assert(cam_set_check("FFCCalPRNU", "2", &ffc, &raw, &why) == -EPERM);
+        assert(cam_set_check("FFCCalTargetValue", "180", &ffc, &raw, &why) == 0 && raw == 2880);
+        assert(cam_set_check("FFCCalTargetValue", "251", &ffc, &raw, &why) == -EPERM);
+        ffc.reverse_x = 1;
+        assert(cam_set_ffc_cal_locked(&ffc) && cam_set_check("FFCCalPRNU", "1", &ffc, &raw, &why) == -EPERM);
+        ffc.reverse_x = 0; ffc.ffc_user_set = 0; ffc.ffc_factory = 1;
+        assert(cam_set_check("FFCCalFPN", "1", &ffc, &raw, &why) == 0);                     /* 工厂模式标志位 */
+    }
+    assert(cam_set_state_addr[0] == CAM16K_CL_CONFIG && cam_set_state_addr[7] == CAM16K_LINE_TRIGGER_MODE &&
+           cam_set_state_addr[13] == CAM16K_BLACK_LEVEL_MAX);
     puts("cam set ok");
 }
 
@@ -523,11 +572,51 @@ static void test_pgm_noise(void)
     puts("pgm noise ok");
 }
 
+/* 线轮廓和对焦指标：造一条已知宽度的边缘，看量出来的 10%–90% 宽度；糊一点锐度就该下降。 */
+static void profile_image(uint8_t *img, uint32_t w, uint32_t h, double ramp_px)
+{
+    uint32_t x, y;
+
+    for (y = 0; y < h; ++y) for (x = 0; x < w; ++x) {
+        double t = ((double)x - 1000.0) / ramp_px + 0.5;      /* 在 x = 1000 附近从 40 线性升到 200，全程 ramp_px 像素 */
+        double v = t <= 0 ? 40 : t >= 1 ? 200 : 40 + 160 * t;
+        img[y * w + x] = (uint8_t)(v + 0.5 + (double)(test_rng() % 3) - 1.0);
+    }
+}
+
+static void test_pgm_profile(void)
+{
+    enum { W = 2048, H = 400 };
+    static uint8_t img[W * H];
+    static struct sg_pgm_profile sharp, soft;
+    uint32_t b;
+
+    profile_image(img, W, H, 2.5);                 /* 线性斜坡全程 2.5 像素 → 10%–90% = 2.0 像素 */
+    assert(sg_pgm_profile(img, W, H, 64, &sharp) == 0 && sharp.bins == 64);
+    assert(sharp.edge_found && sharp.edge_x >= 998 && sharp.edge_x <= 1002);
+    assert(fabs(sharp.edge_width_px - 2.0) < 0.35 && fabs(sharp.edge_contrast - 160.0) < 2.0);
+    assert(fabs(sharp.contrast - 160.0) < 2.0);
+    assert(sharp.mean[0] >= 395 && sharp.mean[0] <= 405 && sharp.mean[63] >= 1995 && sharp.mean[63] <= 2005);
+    b = 1000 / (W / 64);                                              /* 边缘所在的那一段：最小 ≈ 40，最大 ≈ 200 */
+    assert(sharp.min[b] < 420 && sharp.max[b] > 1980 && sharp.min[b] <= sharp.mean[b] && sharp.mean[b] <= sharp.max[b]);
+    assert(sharp.seg_sharpness[3] > 10 * sharp.seg_sharpness[0]);     /* 边缘在第 4 段（x = 1000 / 256） */
+
+    profile_image(img, W, H, 10.0);                /* 糊成 10 像素 → 10%–90% = 8 像素，锐度下降 */
+    assert(sg_pgm_profile(img, W, H, 64, &soft) == 0 && soft.edge_found);
+    assert(fabs(soft.edge_width_px - 8.0) < 0.6 && soft.sharpness < 0.7 * sharp.sharpness);
+
+    memset(img, 90, sizeof img);                   /* 没有边缘 */
+    assert(sg_pgm_profile(img, W, H, 64, &soft) == 0 && !soft.edge_found && soft.sharpness < 0.01);
+    assert(sg_pgm_profile(img, W, H, 7, &soft) == -EINVAL && sg_pgm_profile(img, W, H, 1025, &soft) == -EINVAL);
+    assert(sg_pgm_profile(img, 100, H, 8, &soft) == -EINVAL && sg_pgm_profile(img, W, 0, 64, &soft) == -EINVAL);
+    puts("pgm profile ok");
+}
+
 int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
     test_view_stats(); test_candidates(); test_linecheck(); test_pipeline(); test_cam_serial(); test_cardxml_url(); test_cam_manifest(); test_cam_set(); test_pgmcheck();
-    test_stats_row(); test_screen(); test_pgm_noise();
+    test_stats_row(); test_screen(); test_pgm_noise(); test_pgm_profile();
     puts("unit: ALL PASS");
     return 0;
 }

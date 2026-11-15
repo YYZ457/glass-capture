@@ -65,6 +65,28 @@ struct sg_pgm_noise {
 /* 需要 height >= 2。内存不够返回 -ENOMEM。 */
 int sg_pgm_noise(const uint8_t *img, uint32_t width, uint32_t height, struct sg_pgm_noise *out);
 
+/* ---- 线轮廓和对焦指标（装调、对焦用）----
+ * 线扫相机对着不动的靶标拍，把所有行平均成一条线 m[x]（噪声被平均掉），然后：
+ *   轮廓：把宽度分成 bins 段，每段给出 m 的均值 / 最小 / 最大（×10 取整，0..2550），画出来就是"示波器"视图；
+ *   锐度 sharpness = 1000 × RMS(梯度) ÷ (对比度 + 1)，梯度 = (m[x+1] − m[x−1]) / 2，
+ *        对比度 = m 的 99% 分位 − 1% 分位。拧对焦环时它越大越清楚；除以对比度是为了不受曝光影响；
+ *   分段锐度：宽度方向 8 段各自的锐度。两头和中间差不多 = 相机和玻璃平行；一头高一头低 = 相机歪了；
+ *   最强边缘：梯度最大处的 10%–90% 上升宽度（像素）。靶标是一条黑白直边时，这就是"焦点有多实"，
+ *        目标 ≤ 2 像素（检测方案第 6.2 节）。两侧平台差不到 8 个灰度级时不报（edge_found = 0）。 */
+#define SG_PROFILE_MAX_BINS 1024
+#define SG_FOCUS_SEGMENTS 8
+struct sg_pgm_profile {
+    uint32_t bins;
+    uint16_t mean[SG_PROFILE_MAX_BINS], min[SG_PROFILE_MAX_BINS], max[SG_PROFILE_MAX_BINS];
+    double sharpness, contrast, seg_sharpness[SG_FOCUS_SEGMENTS];
+    int edge_found;
+    uint32_t edge_x;
+    double edge_width_px, edge_contrast;
+};
+
+/* bins 在 8..SG_PROFILE_MAX_BINS 且不超过 width；width >= 128。参数不对 -EINVAL，内存不够 -ENOMEM。 */
+int sg_pgm_profile(const uint8_t *img, uint32_t width, uint32_t height, uint32_t bins, struct sg_pgm_profile *out);
+
 /* 公式名（打印用）。 */
 const char *sg_ramp_name(int which);
 

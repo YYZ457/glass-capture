@@ -12,7 +12,8 @@
 #
 # 会改的东西（全部断电即恢复，不写任何"保存"寄存器）：
 #   驱动：rmmod 后按 cam_serial=1（以及 dma_fast=1）重新 insmod
-#   相机：ClConfiguration=0、DeviceTapGeometry=3、TestPattern、ExposureTime、AnalogGain、LineRate（camera-set 白名单内）
+#   相机：ClConfiguration=0、DeviceTapGeometry=3、TestPattern、ExposureTime、DigitalShift、LineRate（camera-set 白名单内）
+#   （AnalogGain 在 Binning=1 时被相机 XML 锁定，所以调亮用 DigitalShift。）
 #   采集卡：CameraWidth=16384（card-set 白名单内）
 # 从不写：相机 UserSetSave；采集卡 DeviceReboot / ManualFPGAReload。
 #
@@ -168,7 +169,8 @@ shot scene-default
 for e in $EXPOSURES; do
     cam ExposureTime "$e" && shot "scene-exp$e"
 done
-cam AnalogGain 4 && shot scene-gain4
+cam DigitalShift 1 && shot scene-shift2      # ×2；AnalogGain 被相机锁定
+cam DigitalShift 0
 
 # ---- 5. DMA 吞吐：旧模式 ----------------------------------------------------
 say "-- 5. throughput, coherent DMA, 10 kHz"

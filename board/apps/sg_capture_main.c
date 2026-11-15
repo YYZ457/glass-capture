@@ -32,6 +32,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "sg_io_linux.h"
@@ -68,11 +69,15 @@ static void usage(void)
          "       sg3000-capture camera-xml OUTDIR [--entry N] [--device PATH] [--port 0|1] [--baud N]\n"
          "       sg3000-capture camera-read ADDR [LEN] [--device PATH] [--port 0|1] [--baud N]\n"
          "       sg3000-capture camera-regs NAME@ADDR:LEN ... [--device PATH] [--port 0|1] [--baud N]\n"
-         "       sg3000-capture camera-set NAME VALUE [--device PATH] [--baud N]   (runtime only, never UserSetSave)\n"
+         "       sg3000-capture camera-get [--device PATH] [--baud N]   (read only: current camera parameters)\n"
+         "       sg3000-capture camera-set NAME VALUE [--params] [--device PATH] [--baud N]   (runtime only, never UserSetSave / FFCUserSetSave)\n"
          "         ClConfiguration 0|3, DeviceTapGeometry 2|3 (Base only), TestPattern 0|1|2|3|5,\n"
-         "         ExposureTime <us>, DigitalGain <0.10..15.99>, AnalogGain 0..4 (=1.25/1.75/2/3/4x), LineRate <Hz>\n"
+         "         ExposureTime <us>, DigitalGain <0.10..15.99>, AnalogGain 0..4 (=1.25/1.75/2/3/4x), LineRate <Hz>,\n"
+         "         DigitalShift 0..4 (x1..x16), TDIStage 0|1, TDIMode 0|1, BlackLevel <int>,\n"
+         "         FFCEnable 0|1, FFCUserSetSelector 0..3, FFCSampleFrames 1024|2048, FFCCalTargetMode 0|1|2,\n"
+         "         FFCCalTargetValue 0..250, commands (value 1): FFCCalFPN (dark), FFCCalPRNU (bright), FFCUserSetLoad\n"
          "         other camera commands are read-only; all need insmod sg3000_rx.ko cam_serial=1, default baud 115200\n"
-         "       sg3000-capture pgm-stats FILE.pgm [--thumb OUT.pgm] [--thumb-factor 16]   (no card access)\n"
+         "       sg3000-capture pgm-stats FILE.pgm [--thumb OUT.pgm] [--thumb-factor 16] [--profile BINS] [--quick]   (no card access)\n"
          "       sg3000-capture bench [--repeat 3]   (CPU speed of the processing stages, no card access)\n"
          "       sg3000-capture card-set NAME VALUE [--device PATH]\n"
          "         NAME: CameraWidth CameraHeight DeviceTapGeometry ClConfiguration CameraScanType\n"
@@ -581,48 +586,187 @@ static void print_camera_value(const char *name, uint32_t raw)
     }
 }
 
-static int camera_set_main(int argc, char **argv)
+/* 读 cam_set_check 需要的相机状态。前 8 项每次都读（2026-11-14 已在实机上读通）；
+ * 后 6 项（FFC 锁、黑电平范围）只在要写的参数用得到时才读，免得一个没验证过的寄存器拖累所有写入。 */
+static int camera_read_state(struct cam_serial *ser, struct cam_set_state *st, int extended)
 {
-    const char *device = SG_DEFAULT_DEVICE, *why = NULL;
-    unsigned port = 0;
-    unsigned long baud = CAMERA_DEFAULT_BAUD;
-    unsigned char model[CAM_BRM_STRING_LEN];
-    static struct camera_ctx x;
-    struct cam_set_state st;
-    uint32_t addr, raw = 0, old = 0, back = 0, cl = 0, tap = 0;
-    int a, ret;
+    uint32_t v[CAM_SET_STATE_COUNT];
+    int i, ret, n = extended ? CAM_SET_STATE_COUNT : 8;
 
-    if (argc < 4 || !(addr = cam_set_address(argv[2]))) { usage(); return 2; }
-    for (a = 4; a < argc; ++a) {
-        int r = camera_common_arg(argc, argv, &a, &device, &port, &baud);
-        if (r <= 0) { usage(); return 2; }
-    }
-    memset(&st, 0, sizeof st);
-    if (cam_set_check(argv[2], argv[3], &(struct cam_set_state){ 0, CAM16K_MONO8, 0, 1, 0xffffffffu, 1, 0xffffffffu, 0 },
-                      &raw, &why) == -EINVAL) {
-        usage();   /* 格式就不对（比如 TestPattern abc）：不碰硬件 */
-        return 2;
-    }
-    if ((ret = install_interrupt())) goto out;
-    ret = camera_open(&x, device, port, baud);
-    if (!ret) ret = cam_read_mem(&x.ser, CAM_BRM_MODEL, model, sizeof model, CAMERA_TIMEOUT_MS, CAMERA_RETRIES, NULL, NULL);
-    if (ret) goto out;
+    memset(v, 0, sizeof v);
+    for (i = 0; i < n; ++i)
+        if ((ret = cam_gencp_read32(ser, cam_set_state_addr[i], &v[i], CAMERA_TIMEOUT_MS))) return ret;
+    st->cl_config = v[0]; st->pixel_format = v[1]; st->binning_v = v[2];
+    st->exposure_min_clk = v[3]; st->exposure_max_clk = v[4];
+    st->line_period_min_clk = v[5]; st->line_period_max_clk = v[6]; st->line_trigger_mode = v[7];
+    st->ffc_factory = v[8]; st->ffc_user_set = v[9]; st->reverse_x = v[10]; st->ffc_target_mode = v[11];
+    st->black_min = (int32_t)v[12]; st->black_max = (int32_t)v[13];
+    return 0;
+}
+
+static int camera_check_model(struct cam_serial *ser)
+{
+    unsigned char model[CAM_BRM_STRING_LEN];
+    int ret = cam_read_mem(ser, CAM_BRM_MODEL, model, sizeof model, CAMERA_TIMEOUT_MS, CAMERA_RETRIES, NULL, NULL);
+
+    if (ret) return ret;
     model[sizeof model - 1] = 0;
     if (strcmp((const char *)model, CAM16K_MODEL)) {
         fprintf(stderr, "Refused: camera model is \"%s\", register addresses are only verified for %s\n",
                 (const char *)model, CAM16K_MODEL);
-        ret = -ENODEV;
-        goto out;
+        return -ENODEV;
     }
-    if ((ret = cam_gencp_read32(&x.ser, CAM16K_CL_CONFIG, &st.cl_config, CAMERA_TIMEOUT_MS)) ||
-        (ret = cam_gencp_read32(&x.ser, CAM16K_PIXEL_FORMAT, &st.pixel_format, CAMERA_TIMEOUT_MS)) ||
-        (ret = cam_gencp_read32(&x.ser, CAM16K_BINNING_V, &st.binning_v, CAMERA_TIMEOUT_MS)) ||
-        (ret = cam_gencp_read32(&x.ser, CAM16K_EXPOSURE_MIN_CLK, &st.exposure_min_clk, CAMERA_TIMEOUT_MS)) ||
-        (ret = cam_gencp_read32(&x.ser, CAM16K_EXPOSURE_MAX_CLK, &st.exposure_max_clk, CAMERA_TIMEOUT_MS)) ||
-        (ret = cam_gencp_read32(&x.ser, CAM16K_LINE_PERIOD_MIN, &st.line_period_min_clk, CAMERA_TIMEOUT_MS)) ||
-        (ret = cam_gencp_read32(&x.ser, CAM16K_LINE_PERIOD_MAX, &st.line_period_max_clk, CAMERA_TIMEOUT_MS)) ||
-        (ret = cam_gencp_read32(&x.ser, CAM16K_LINE_TRIGGER_MODE, &st.line_trigger_mode, CAMERA_TIMEOUT_MS)) ||
-        (ret = cam_gencp_read32(&x.ser, addr, &old, CAMERA_TIMEOUT_MS)))
+    return 0;
+}
+
+/* 把相机当前的参数逐个读出来打印（中控台的相机页用）。只读。
+ * 每行：CameraParam 名字 raw=原始值 [value=换算后的值] [min= max=] [unit=] [locked=1]
+ * 某个寄存器读不出来只影响那一行（error=…）；连续两个读不出来就停（相机多半已经不应答，别再等超时）。 */
+enum { CP_RAW, CP_HEX, CP_EXPOSURE, CP_LINE_RATE, CP_GAIN256, CP_SIGNED, CP_DIV16, CP_TEMPERATURE };
+static const struct { const char *name; uint32_t addr; int kind; } CAMERA_PARAMS[] = {
+    { "Width", CAM16K_WIDTH, CP_RAW }, { "PixelFormat", CAM16K_PIXEL_FORMAT, CP_HEX },
+    { "ClConfiguration", CAM16K_CL_CONFIG, CP_RAW }, { "DeviceTapGeometry", CAM16K_TAP_GEOMETRY, CP_RAW },
+    { "TestPattern", CAM16K_TEST_PATTERN, CP_RAW }, { "ExposureTime", CAM16K_EXPOSURE_CLK, CP_EXPOSURE },
+    { "LineRate", CAM16K_LINE_PERIOD_CLK, CP_LINE_RATE }, { "MeasuredLineRate", CAM16K_MEASURED_PERIOD, CP_LINE_RATE },
+    { "LineTriggerMode", CAM16K_LINE_TRIGGER_MODE, CP_RAW }, { "AnalogGain", CAM16K_ANALOG_GAIN, CP_RAW },
+    { "DigitalGain", CAM16K_DIGITAL_GAIN, CP_GAIN256 }, { "DigitalShift", CAM16K_DIGITAL_SHIFT, CP_RAW },
+    { "BlackLevel", CAM16K_BLACK_LEVEL, CP_SIGNED }, { "Binning", CAM16K_BINNING_V, CP_RAW },
+    { "TDIStage", CAM16K_TDI_STAGE, CP_RAW }, { "TDIMode", CAM16K_TDI_MODE, CP_RAW },
+    { "FFCEnable", CAM16K_FFC_ENABLE, CP_RAW }, { "FFCUserSetSelector", CAM16K_FFC_USER_SET, CP_RAW },
+    { "FFCSampleFrames", CAM16K_FFC_SAMPLE_FRAMES, CP_RAW }, { "FFCCalTargetMode", CAM16K_FFC_TARGET_MODE, CP_RAW },
+    { "FFCCalTargetValue", CAM16K_FFC_TARGET_VALUE, CP_DIV16 }, { "FFCFactory", CAM16K_FFC_FACTORY, CP_RAW },
+    { "ReverseX", CAM16K_REVERSE_X, CP_RAW }, { "Temperature", CAM16K_TEMPERATURE, CP_TEMPERATURE },
+};
+
+static int print_camera_params(struct cam_serial *ser)
+{
+    struct cam_set_state st;
+    uint32_t v, lo, hi;
+    unsigned i, failed = 0, printed = 0;
+    int have_state, ret;
+
+    memset(&st, 0, sizeof st);
+    have_state = camera_read_state(ser, &st, 0) == 0;
+    for (i = 0; i < sizeof CAMERA_PARAMS / sizeof CAMERA_PARAMS[0]; ++i) {
+        const char *name = CAMERA_PARAMS[i].name;
+
+        ret = cam_gencp_read32(ser, CAMERA_PARAMS[i].addr, &v, CAMERA_TIMEOUT_MS);
+        if (ret) {
+            printf("CameraParam %s error=%d\n", name, ret);
+            if (++failed >= 2) {
+                printf("CameraParamAbort after %s: camera stopped answering\n", name);
+                return printed ? 0 : ret;
+            }
+            continue;
+        }
+        failed = 0;
+        printed++;
+        switch (CAMERA_PARAMS[i].kind) {
+        case CP_HEX:
+            printf("CameraParam %s raw=0x%08x\n", name, v);
+            break;
+        case CP_EXPOSURE:
+            printf("CameraParam %s raw=%u value=%.2f", name, v, v / (double)CAM16K_SENSOR_MHZ);
+            if (have_state)
+                printf(" min=%.2f max=%.2f", st.exposure_min_clk / (double)CAM16K_SENSOR_MHZ,
+                       st.exposure_max_clk / (double)CAM16K_SENSOR_MHZ);
+            printf(" unit=us\n");
+            break;
+        case CP_LINE_RATE:
+            printf("CameraParam %s raw=%u value=%.1f", name, v, v ? CAM16K_SENSOR_MHZ * 1e6 / v : 0.0);
+            if (have_state && CAMERA_PARAMS[i].addr == CAM16K_LINE_PERIOD_CLK && st.line_period_min_clk && st.line_period_max_clk)
+                printf(" min=%.1f max=%.1f%s", CAM16K_SENSOR_MHZ * 1e6 / st.line_period_max_clk,
+                       CAM16K_SENSOR_MHZ * 1e6 / st.line_period_min_clk, st.line_trigger_mode ? " locked=1" : "");
+            printf(" unit=Hz\n");
+            break;
+        case CP_GAIN256:
+            printf("CameraParam %s raw=%u value=%.3f unit=x\n", name, v, v / 256.0);
+            break;
+        case CP_SIGNED:
+            printf("CameraParam %s raw=%u value=%d", name, v, (int32_t)v);
+            if (!cam_gencp_read32(ser, CAM16K_BLACK_LEVEL_MIN, &lo, CAMERA_TIMEOUT_MS) &&
+                !cam_gencp_read32(ser, CAM16K_BLACK_LEVEL_MAX, &hi, CAMERA_TIMEOUT_MS))
+                printf(" min=%d max=%d", (int32_t)lo, (int32_t)hi);
+            printf("\n");
+            break;
+        case CP_DIV16:
+            printf("CameraParam %s raw=%u value=%u\n", name, v, v / 16u);
+            break;
+        case CP_TEMPERATURE:
+            printf("CameraParam %s raw=%u value=%.1f unit=C\n", name, v, ((double)v - 2000.0) / 10.0);
+            break;
+        default:
+            printf("CameraParam %s raw=%u%s\n", name, v,
+                   CAMERA_PARAMS[i].addr == CAM16K_ANALOG_GAIN && have_state && (st.binning_v == 1u || st.binning_v == 2u)
+                       ? " locked=1" : CAMERA_PARAMS[i].addr == CAM16K_TAP_GEOMETRY && have_state &&
+                                       (st.cl_config != 0u || st.pixel_format != CAM16K_MONO8) ? " locked=1" : "");
+        }
+    }
+    return 0;
+}
+
+/* sg3000-capture camera-get：只读，列出相机当前参数。 */
+static int camera_get_main(int argc, char **argv)
+{
+    const char *device = SG_DEFAULT_DEVICE;
+    unsigned port = 0;
+    unsigned long baud = CAMERA_DEFAULT_BAUD;
+    static struct camera_ctx x;
+    int a, ret;
+
+    for (a = 2; a < argc; ++a) {
+        int r = camera_common_arg(argc, argv, &a, &device, &port, &baud);
+        if (r <= 0) { usage(); return 2; }
+    }
+    if ((ret = install_interrupt())) goto out;
+    ret = camera_open(&x, device, port, baud);
+    if (!ret) ret = camera_check_model(&x.ser);
+    if (!ret) ret = print_camera_params(&x.ser);
+    if (!ret) printf("CameraGet done (read only)\n");
+out:
+    camera_close(&x);
+    if (ret) fprintf(stderr, "Failed: %s (%d)\n", strerror(-ret), ret);
+    return ret ? 1 : 0;
+}
+
+static int camera_set_main(int argc, char **argv)
+{
+    /* 只用来在碰硬件之前查"格式对不对"的宽松状态 */
+    static const struct cam_set_state permissive = {
+        .pixel_format = CAM16K_MONO8, .exposure_min_clk = 1, .exposure_max_clk = 0xffffffffu,
+        .line_period_min_clk = 1, .line_period_max_clk = 0xffffffffu,
+        .ffc_user_set = 1, .ffc_target_mode = 2, .black_min = INT32_MIN, .black_max = INT32_MAX,
+    };
+    const char *device = SG_DEFAULT_DEVICE, *why = NULL;
+    unsigned port = 0;
+    unsigned long baud = CAMERA_DEFAULT_BAUD;
+    static struct camera_ctx x;
+    struct cam_set_state st;
+    uint32_t addr, raw = 0, old = 0, back = 0, cl = 0, tap = 0;
+    int a, ret, command, extended, params = 0;
+
+    if (argc < 4 || !(addr = cam_set_address(argv[2]))) { usage(); return 2; }
+    for (a = 4; a < argc; ++a) {
+        int r;
+
+        if (!strcmp(argv[a], "--params")) { params = 1; continue; }   /* 写完顺便列出全部参数（中控台用） */
+        r = camera_common_arg(argc, argv, &a, &device, &port, &baud);
+        if (r <= 0) { usage(); return 2; }
+    }
+    memset(&st, 0, sizeof st);
+    if (cam_set_check(argv[2], argv[3], &permissive, &raw, &why) == -EINVAL) {
+        usage();   /* 格式就不对（比如 TestPattern abc）：不碰硬件 */
+        return 2;
+    }
+    command = cam_set_is_command(argv[2]);
+    extended = addr == CAM16K_FFC_CAL_FPN || addr == CAM16K_FFC_CAL_PRNU ||
+               addr == CAM16K_FFC_TARGET_VALUE || addr == CAM16K_BLACK_LEVEL;
+    if ((ret = install_interrupt())) goto out;
+    ret = camera_open(&x, device, port, baud);
+    if (!ret) ret = camera_check_model(&x.ser);
+    if (ret) goto out;
+    if ((ret = camera_read_state(&x.ser, &st, extended)) ||
+        (!command && (ret = cam_gencp_read32(&x.ser, addr, &old, CAMERA_TIMEOUT_MS))))
         goto out;
     ret = cam_set_check(argv[2], argv[3], &st, &raw, &why);
     if (ret) {
@@ -634,21 +778,49 @@ static int camera_set_main(int argc, char **argv)
                 st.line_period_max_clk ? CAM16K_SENSOR_MHZ * 1e6 / st.line_period_max_clk : 0.0,
                 st.line_period_min_clk ? CAM16K_SENSOR_MHZ * 1e6 / st.line_period_min_clk : 0.0,
                 st.line_trigger_mode);
+        if (extended)
+            fprintf(stderr, "  FFCFactory=%u FFCUserSetSelector=%u ReverseX=%u FFCCalTargetMode=%u BlackLevel range %d..%d\n",
+                    st.ffc_factory, st.ffc_user_set, st.reverse_x, st.ffc_target_mode, st.black_min, st.black_max);
         goto out;
     }
-    if ((ret = cam_gencp_write32(&x.ser, addr, raw, CAMERA_TIMEOUT_MS)) ||
-        (ret = cam_gencp_read32(&x.ser, addr, &back, CAMERA_TIMEOUT_MS)) ||
-        (ret = cam_gencp_read32(&x.ser, CAM16K_CL_CONFIG, &cl, CAMERA_TIMEOUT_MS)) ||
+    if (command) {
+        /* 命令寄存器只能写。校正要采 1024 / 2048 行，期间相机可能不应答：写完等它重新应答（最多 15 秒）。 */
+        struct timespec pause = { 0, 300 * 1000000L };
+        unsigned waited = 0;
+
+        if ((ret = cam_gencp_write32(&x.ser, addr, raw, CAMERA_TIMEOUT_MS))) goto out;
+        do {
+            nanosleep(&pause, NULL);
+            waited += 300;
+            ret = cam_gencp_read32(&x.ser, CAM16K_CL_CONFIG, &cl, CAMERA_TIMEOUT_MS);
+            if (ret) {
+                waited += CAMERA_TIMEOUT_MS;
+                (void)cam_serial_drain(&x.ser, 8, 50);
+            }
+        } while (ret && waited < 15000 && !interrupted);
+        if (ret) {
+            fprintf(stderr, "Camera did not answer again within 15 s after the command\n");
+            goto out;
+        }
+        printf("CameraCommand %s 0x%08x: sent, camera answered again after about %u ms (write-only register, no readback)\n",
+               argv[2], addr, waited);
+    } else {
+        if ((ret = cam_gencp_write32(&x.ser, addr, raw, CAMERA_TIMEOUT_MS)) ||
+            (ret = cam_gencp_read32(&x.ser, addr, &back, CAMERA_TIMEOUT_MS)))
+            goto out;
+        printf("CameraSet %s 0x%08x: %u -> %u, readback %u\n", argv[2], addr, old, raw, back);
+        print_camera_value(argv[2], back);
+    }
+    if ((ret = cam_gencp_read32(&x.ser, CAM16K_CL_CONFIG, &cl, CAMERA_TIMEOUT_MS)) ||
         (ret = cam_gencp_read32(&x.ser, CAM16K_TAP_GEOMETRY, &tap, CAMERA_TIMEOUT_MS)))
         goto out;
-    printf("CameraSet %s 0x%08x: %u -> %u, readback %u\n", argv[2], addr, old, raw, back);
-    print_camera_value(argv[2], back);
     printf("CameraState ClConfiguration=%u (0 Base / 3 EightyBit) DeviceTapGeometry=%u PixelFormat=0x%08x "
            "(not saved: camera power cycle restores UserSet1)\n", cl, tap, st.pixel_format);
-    if (back != raw) {
+    if (!command && back != raw) {
         fprintf(stderr, "Camera did not keep the value\n");
         ret = -EIO;
     }
+    if (!ret && params) (void)print_camera_params(&x.ser);
 out:
     camera_close(&x);
     if (ret) fprintf(stderr, "Failed: %s (%d)\n", strerror(-ret), ret);
@@ -661,7 +833,8 @@ out:
 static int pgm_stats_main(int argc, char **argv)
 {
     const char *thumb = NULL;
-    unsigned long factor = 16;
+    unsigned long factor = 16, bins = 0;
+    int quick = 0;
     struct sg_capture_frame frame, small;
     struct sg_pgm_check c;
     char *end;
@@ -673,6 +846,11 @@ static int pgm_stats_main(int argc, char **argv)
         else if (!strcmp(argv[a], "--thumb-factor") && a + 1 < argc) {
             factor = strtoul(argv[++a], &end, 10);
             if (*end || factor < 1 || factor > 256) { usage(); return 2; }
+        } else if (!strcmp(argv[a], "--profile") && a + 1 < argc) {
+            bins = strtoul(argv[++a], &end, 10);
+            if (*end || bins < 8 || bins > SG_PROFILE_MAX_BINS) { usage(); return 2; }
+        } else if (!strcmp(argv[a], "--quick")) {
+            quick = 1;                      /* 实时调试用：不算噪声模型（那一步最慢） */
         } else { usage(); return 2; }
     }
     ret = pgm_read(argv[2], &frame, SG_CAPTURE_MAX_BYTES);
@@ -691,7 +869,34 @@ static int pgm_stats_main(int argc, char **argv)
         }
         printf("\nPGMFlat all0=%s all255=%s\n", c.all_zero ? "yes" : "no", c.all_255 ? "yes" : "no");
     }
-    if (!ret && frame.height >= 2) {       /* 噪声模型：只对静止场景有意义，见 sg_pgmcheck.h */
+    if (!ret && bins) {                    /* 线轮廓 + 对焦指标（中控台的"采图与对焦"页） */
+        static struct sg_pgm_profile pf;
+        static const struct { const char *tag; const uint16_t *v; } rows[3] = {
+            { "PGMProfileMean", pf.mean }, { "PGMProfileMin", pf.min }, { "PGMProfileMax", pf.max },
+        };
+        unsigned i, j;
+
+        ret = sg_pgm_profile(frame.data, frame.width, frame.height, (uint32_t)bins, &pf);
+        if (!ret) {
+            printf("PGMProfile bins=%u width=%u scale=10\n", pf.bins, frame.width);
+            for (j = 0; j < 3; ++j) {
+                for (i = 0; i < pf.bins; ++i) {
+                    if (i % 32 == 0) printf("%s%s %u:", i ? "\n" : "", rows[j].tag, i);
+                    printf(" %u", rows[j].v[i]);
+                }
+                printf("\n");
+            }
+            printf("PGMFocus sharpness=%.2f contrast=%.1f", pf.sharpness, pf.contrast);
+            if (pf.edge_found)
+                printf(" edge=found x=%u width_px=%.2f edge_contrast=%.1f\n", pf.edge_x, pf.edge_width_px, pf.edge_contrast);
+            else
+                printf(" edge=none\n");
+            printf("PGMFocusSeg");
+            for (i = 0; i < SG_FOCUS_SEGMENTS; ++i) printf(" %.2f", pf.seg_sharpness[i]);
+            printf("\n");
+        }
+    }
+    if (!ret && !quick && frame.height >= 2) {       /* 噪声模型：只对静止场景有意义，见 sg_pgmcheck.h */
         struct sg_pgm_noise nz;
 
         ret = sg_pgm_noise(frame.data, frame.width, frame.height, &nz);
@@ -850,6 +1055,9 @@ int main(int argc, char **argv)
     }
     if (!strcmp(argv[1], "camera-regs")) {
         return camera_regs_main(argc, argv);
+    }
+    if (!strcmp(argv[1], "camera-get")) {
+        return camera_get_main(argc, argv);
     }
     if (!strcmp(argv[1], "camera-set")) {
         return camera_set_main(argc, argv);

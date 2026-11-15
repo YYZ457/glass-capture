@@ -89,7 +89,7 @@ class Handler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
         try:
             if parsed.path == '/api/bootstrap':
-                self.send(200, dict(token=TOKEN, root=str(ROOT), version='0.4', bundle=str(ROOT.parent), files=[dict(id=k, path=v[0], line=v[1], title=v[2], guide=v[3]) for k, v in FILES.items()]))
+                self.send(200, dict(token=TOKEN, root=str(ROOT), version='1.0', bundle=str(ROOT.parent), files=[dict(id=k, path=v[0], line=v[1], title=v[2], guide=v[3]) for k, v in FILES.items()]))
             elif parsed.path == '/api/frames/state':
                 self.send(200, self.server.frames.state())
             elif parsed.path == '/api/frames/results':
@@ -201,6 +201,10 @@ class Handler(BaseHTTPRequestHandler):
                 c.wake()
             elif self.path == '/api/interrupt':
                 c.interrupt()
+            elif self.path == '/api/live_stop':
+                c.stop_live()
+            elif self.path == '/api/live_clear':
+                c.clear_live_history()
             elif self.path == '/api/action':
                 c.start(data.get('action'), data.get('options'))
             elif self.path == '/api/shutdown':
