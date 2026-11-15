@@ -21,6 +21,7 @@
 #include "cam_xml.h"
 #include "cam_set.h"
 #include "sg_pgmcheck.h"
+#include "sg_screen.h"
 #include "sg3000_regs.h"
 
 static struct sg_image_view view(unsigned char *p, uint32_t w, uint32_t h)
@@ -367,10 +368,166 @@ static void test_pgmcheck(void)
     puts("pgmcheck ok");
 }
 
+
+static uint32_t test_rng_state = 1;
+static uint32_t test_rng(void)
+{
+    test_rng_state = test_rng_state * 1664525u + 1013904223u;
+    return test_rng_state >> 8;
+}
+
+/* 提速后的 sg_stats_row（ARM64 上是 NEON）必须和逐像素的笨办法完全一样，各种长度都要对。 */
+static void test_stats_row(void)
+{
+    enum { N = 5000 };
+    static unsigned char buf[N];
+    static const uint32_t lengths[] = { 0, 1, 15, 16, 17, 31, 255, 2047, 2048, 2049, 4096, 4999, N };
+    static const uint32_t thresholds[] = { 0, 1, 127, 128, 254, 255 };
+    unsigned li, ti, mode;
+    uint32_t x;
+
+    for (mode = 0; mode < 3; ++mode) {
+        for (x = 0; x < N; ++x) buf[x] = mode == 0 ? (unsigned char)test_rng() : mode == 1 ? 255 : 0;
+        for (li = 0; li < sizeof lengths / sizeof lengths[0]; ++li) {
+            for (ti = 0; ti < sizeof thresholds / sizeof thresholds[0]; ++ti) {
+                uint64_t sum = 5, above = 7, rsum = 5, rabove = 7;
+                uint32_t min = 200, max = 3, rmin = 200, rmax = 3;
+
+                for (x = 0; x < lengths[li]; ++x) {
+                    rsum += buf[x];
+                    rabove += buf[x] > thresholds[ti];
+                    if (buf[x] < rmin) rmin = buf[x];
+                    if (buf[x] > rmax) rmax = buf[x];
+                }
+                sg_stats_row(buf, lengths[li], thresholds[ti], &sum, &above, &min, &max);
+                assert(sum == rsum && above == rabove && min == rmin && max == rmax);
+            }
+        }
+    }
+    {   /* 经处理器走一遍：宽度不是 16 的倍数、stride 比宽度大 */
+        enum { W = 1003, H = 7, STRIDE = 1024 };
+        static unsigned char img[STRIDE * H];
+        struct sg_image_view v = view(img, W, H);
+        struct sg_processor p; struct sg_processing_result r;
+        uint64_t rsum = 0, rabove = 0; uint32_t rmin = 255, rmax = 0, y;
+
+        v.stride = STRIDE; v.bytes = (uint64_t)STRIDE * H;
+        for (x = 0; x < STRIDE * H; ++x) img[x] = (unsigned char)test_rng();
+        for (y = 0; y < H; ++y) for (x = 0; x < W; ++x) {
+            unsigned char px = img[y * STRIDE + x];
+            rsum += px; rabove += px > 100;
+            if (px < rmin) rmin = px;
+            if (px > rmax) rmax = px;
+        }
+        assert(sg_stats_open(&p, 100) == 0);
+        assert(p.process(p.context, &v, 1000, &r) == 0);
+        assert(r.sum == rsum && r.above_threshold == rabove && r.minimum == rmin && r.maximum == rmax);
+        p.close(p.context);
+    }
+    puts("stats row ok");
+}
+
+/* 快筛：和逐像素的笨办法比 run 列表；截断、参数检查、"永不报"的边界值。 */
+static void test_screen(void)
+{
+    enum { W = 333, H = 40, STRIDE = 340, CAP = W * H };
+    static uint8_t img[STRIDE * H], lo[W], hi[W];
+    static struct sg_run got[CAP], want[CAP];
+    struct sg_screen_stats st;
+    uint32_t count, n, x, y, round;
+
+    for (round = 0; round < 6; ++round) {
+        uint64_t dark = 0, bright = 0;
+
+        for (x = 0; x < STRIDE * H; ++x) {
+            uint32_t q = test_rng();
+            /* round 0–2：大多数像素不命中，偶尔一小段命中（像真实图）；3–5：到处都是命中 */
+            img[x] = round < 3 ? (uint8_t)(128 + (q % 5) - 2 + ((q >> 8) % 97 == 0 ? 60 : 0) - ((q >> 16) % 89 == 0 ? 60 : 0))
+                               : (uint8_t)q;
+        }
+        for (x = 0; x < W; ++x) {
+            lo[x] = round < 3 ? 120 : (uint8_t)(test_rng() % 128);
+            hi[x] = round < 3 ? 136 : (uint8_t)(128 + test_rng() % 128);
+        }
+        if (round == 5) for (x = 0; x < W; ++x) { lo[x] = 0; hi[x] = 255; }     /* 永不报 */
+        for (n = 0, y = 0; y < H; ++y) {
+            int cur = 0; uint32_t x0 = 0;
+            for (x = 0; x <= W; ++x) {
+                uint8_t px = x < W ? img[y * STRIDE + x] : 0;
+                int cls = x == W ? 0 : px < lo[x] ? 1 : px > hi[x] ? 2 : 0;
+                if (cur && cls != cur) {
+                    want[n].y = y; want[n].x0 = (uint16_t)x0; want[n].x1 = (uint16_t)x; want[n].bright = cur == 2;
+                    if (cur == 2) bright += x - x0; else dark += x - x0;
+                    n++; cur = 0;
+                }
+                if (cls && !cur) { cur = cls; x0 = x; }
+            }
+        }
+        assert(sg_screen(img, W, H, STRIDE, lo, hi, got, CAP, &count, &st) == 0);
+        assert(count == n && st.runs == n && st.dark_pixels == dark && st.bright_pixels == bright);
+        for (x = 0; x < n; ++x)
+            assert(got[x].y == want[x].y && got[x].x0 == want[x].x0 && got[x].x1 == want[x].x1 && got[x].bright == want[x].bright);
+        assert(round != 5 || n == 0);
+        assert(round >= 3 || (n > 20 && n < W * H / 20));
+        if (n > 3) {                 /* 容量不够：前 3 个照写，其余只计数 */
+            assert(sg_screen(img, W, H, STRIDE, lo, hi, got, 3, &count, &st) == SG_SCREEN_TRUNCATED);
+            assert(count == 3 && st.runs == n && st.dark_pixels == dark && got[2].x0 == want[2].x0);
+            assert(sg_screen(img, W, H, STRIDE, lo, hi, NULL, 0, &count, &st) == SG_SCREEN_TRUNCATED && count == 0);
+        }
+    }
+    assert(sg_screen(img, 0, H, STRIDE, lo, hi, got, CAP, &count, &st) == -EINVAL);
+    assert(sg_screen(img, W, H, W - 1, lo, hi, got, CAP, &count, &st) == -EINVAL);
+    assert(sg_screen(img, W, H, STRIDE, lo, hi, NULL, 5, &count, &st) == -EINVAL);
+    assert(sg_screen(NULL, W, H, STRIDE, lo, hi, got, CAP, &count, &st) == -EINVAL);
+    assert(!strcmp(sg_screen_backend(), "neon") || !strcmp(sg_screen_backend(), "generic"));
+    puts("screen ok");
+}
+
+/* 噪声模型：造一张"静止场景"图，四种亮度、噪声方差随亮度线性增加，看分档和拟合。 */
+static void test_pgm_noise(void)
+{
+    enum { W = 4 * 96, H = 1500 };
+    static const uint32_t level[4] = { 10, 40, 100, 200 };
+    static const uint32_t spread[4] = { 1, 2, 3, 4 };       /* 均匀噪声 ±spread：方差 = s(s+1)/3 */
+    static uint8_t img[W * H];
+    struct sg_pgm_noise nz;
+    uint32_t x, y, b, seen = 0;
+
+    for (y = 0; y < H; ++y) for (x = 0; x < W; ++x) {
+        uint32_t g = x / 96;
+        img[y * W + x] = (uint8_t)(level[g] + test_rng() % (2 * spread[g] + 1) - spread[g]);
+    }
+    assert(sg_pgm_noise(img, W, H, &nz) == 0);
+    for (b = 0; b < SG_NOISE_BINS; ++b) {
+        uint32_t g;
+        if (!nz.bin[b].columns) continue;
+        for (g = 0; g < 4 && !(level[g] >= nz.bin[b].lo && level[g] < nz.bin[b].hi); ++g) {}
+        assert(g < 4 && nz.bin[b].columns == 96);
+        assert(fabs(nz.bin[b].mean - level[g]) < 0.05);
+        assert(fabs(nz.bin[b].var_diff - spread[g] * (spread[g] + 1) / 3.0) < 0.05 * spread[g] * (spread[g] + 1) / 3.0 + 0.02);
+        assert(fabs(nz.bin[b].var_total - nz.bin[b].var_diff) < 0.1 * nz.bin[b].var_diff + 0.02);
+        seen++;
+    }
+    assert(seen == 4 && nz.fit_ok && nz.fit_bins == 4 && nz.saturated_columns == 0);
+    assert(nz.slope > 0.025 && nz.slope < 0.04 && fabs(nz.read_var) < 1.0);
+    assert(fabs(nz.tap_mean[0] - 87.5) < 0.1 && fabs(nz.tap_mean[0] - nz.tap_mean[2]) < 0.1);
+
+    for (y = 0; y < H; ++y) img[y * W + 5] = y & 1 ? 255 : 250;       /* 一列饱和：不参与 */
+    for (y = 0; y < H; ++y) for (x = 96; x < 192; ++x) img[y * W + x] = (uint8_t)(40 + y / 100);   /* 慢漂：差分方差几乎为 0 */
+    assert(sg_pgm_noise(img, W, H, &nz) == 0 && nz.saturated_columns == 1);
+    for (b = 0; b < SG_NOISE_BINS; ++b)
+        if (nz.bin[b].lo <= 47 && nz.bin[b].hi > 47) assert(nz.bin[b].var_diff < 0.01 && nz.bin[b].var_total > 10.0);
+    memset(img, 7, sizeof img);                                         /* 只有一种亮度：不拟合 */
+    assert(sg_pgm_noise(img, W, H, &nz) == 0 && !nz.fit_ok && nz.fit_bins == 1);
+    assert(sg_pgm_noise(img, W, 1, &nz) == -EINVAL);
+    puts("pgm noise ok");
+}
+
 int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
     test_view_stats(); test_candidates(); test_linecheck(); test_pipeline(); test_cam_serial(); test_cardxml_url(); test_cam_manifest(); test_cam_set(); test_pgmcheck();
+    test_stats_row(); test_screen(); test_pgm_noise();
     puts("unit: ALL PASS");
     return 0;
 }

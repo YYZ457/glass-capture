@@ -39,6 +39,32 @@ int sg_pgm_check(const uint8_t *img, uint32_t width, uint32_t height, struct sg_
 int sg_pgm_thumb(const uint8_t *img, uint32_t width, uint32_t height, uint32_t factor,
                  uint8_t *out, uint32_t *out_w, uint32_t *out_h);
 
+/* ---- 噪声模型（光子转移）：静止场景的一张图就够 ----
+ * 线扫相机对着不动的东西拍，每一列在时间上是同一个点 → 每列的"均值—方差"就是一个采样点。
+ * 画面里有亮有暗（比如一条明暗边界）时，一张图就能覆盖很多个亮度，拟合
+ *     方差 = read_var + slope × 均值
+ * 得到读出噪声（√read_var，单位 DN）和每个 DN 对应多少电子（1 / slope）。
+ * 方差用相邻两行之差算（Σ(p[y+1] − p[y])² ÷ 2(h−1)），不怕光源慢慢漂；
+ * 同时给出普通方差 var_total：它比 var_diff 大很多 = 场景在动或光在闪，这张图不能用来算噪声。
+ * 有饱和像素（255）的列不参与。结果用于 docs/design/detection_plan.md 第 6.2 节第 2 步。 */
+#define SG_NOISE_BINS 18
+struct sg_noise_bin {
+    uint32_t lo, hi;                 /* 列均值落在 [lo, hi) 的列归这一档 */
+    uint32_t columns;
+    double mean, var_diff, var_total;
+};
+struct sg_pgm_noise {
+    struct sg_noise_bin bin[SG_NOISE_BINS];
+    uint32_t saturated_columns;
+    double tap_mean[3], tap_var[3];  /* 按列 % 3（Base 3 Tap 的三路）分开：三路差得多 = 通道增益不一致 */
+    int fit_ok;                      /* 至少 3 档、每档 >= 16 列、斜率为正才拟合 */
+    uint32_t fit_bins;
+    double read_var, slope;          /* 方差 = read_var + slope × 均值 */
+};
+
+/* 需要 height >= 2。内存不够返回 -ENOMEM。 */
+int sg_pgm_noise(const uint8_t *img, uint32_t width, uint32_t height, struct sg_pgm_noise *out);
+
 /* 公式名（打印用）。 */
 const char *sg_ramp_name(int which);
 

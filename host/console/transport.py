@@ -481,13 +481,13 @@ class Console:
                 '；'.join(f'{k}={v}' for k, v in key.items()))
 
     def _board_session(self):
-        """一键上板测试：板上跑 board_session.sh（BRINGUP 5⅞ + 5⁹，约 3–5 分钟），取回结果包并解开。"""
+        """一键上板测试：板上跑 board_session.sh（BRINGUP 5⅞ + 5⁹ + CPU 基准，约 4–6 分钟），取回结果包并解开。"""
         import tarfile
         rc, _ = self.exchange(f"test -f {BOARD_DIR}/board_session.sh", 10)
         if rc:
             raise RuntimeError('板上没有 board_session.sh：SD 卡里的 glass-capture/ 是旧版。用新 dist 更新 SD 卡，再做「02 从 SD 加载程序」。')
-        self.event('system', '一键上板测试开始：会重载驱动、切相机和卡到 Base 3 Tap / 16384、拍测试图、调曝光增益、测 DMA 吞吐和 15 kHz。'
-                             '全部断电可恢复，约 3–5 分钟，请不要中断。')
+        self.event('system', '一键上板测试开始：会重载驱动、切相机和卡到 Base 3 Tap / 16384、拍测试图、调曝光增益、测 DMA 吞吐和 15 kHz，最后测 CPU 处理速度。'
+                             '全部断电可恢复，约 4–6 分钟，请不要中断。')
         rc, output = self.exchange(f"sh {BOARD_DIR}/board_session.sh 2>&1", 1800)
         saved = re.search(r'BoardSession saved: (\S+\.tar\.gz) \((\d+) bytes', output)
         if not saved:
@@ -504,11 +504,11 @@ class Console:
                 target.write_bytes(tar.extractfile(member).read())
         failed = re.search(r'== Summary: (\d+) step', output)
         lines = [l.strip() for l in output.replace('\r', '').splitlines()
-                 if l.strip().startswith(('StreamSummary', 'Ramp ', 'FAIL', 'SKIP'))]
+                 if l.strip().startswith(('StreamSummary', 'StreamHint', 'Ramp ', 'FAIL', 'SKIP', 'Bench name'))]
         head = f"一键测试完成：{failed.group(1) if failed else '?'} 步失败。结果已存到 {folder}（session.log、summary.txt、缩略图）。"
         if rc and not failed:
             raise RuntimeError(head + ' 脚本中途退出：' + output[-400:])
-        return head + ' ' + '；'.join(lines[:8]) + '。把整个文件夹发给 Claude。'
+        return head + ' ' + '；'.join(lines[:16]) + '。把整个文件夹发给 Claude。'
 
     def _parse_preflight_status(self, output):
         ddr = re.search(r'DDR status\s+(\d+)', output)

@@ -265,7 +265,8 @@ static int cand_process(void *context, const struct sg_image_view *v, uint32_t t
 {
     struct cand_proc *cp = context;
     struct sg_background bg;
-    uint32_t x, y;
+    uint64_t unused = 0;
+    uint32_t x, y, n;
     int ret;
 
     (void)timeout_ms;   /* 第一版没有中途超时检查；流水线的队列满检测兜底 */
@@ -304,10 +305,9 @@ static int cand_process(void *context, const struct sg_image_view *v, uint32_t t
     r->minimum = 255;
     for (y = 0; y < v->height; ++y) {
         const unsigned char *row = v->pixels + (size_t)y * v->stride;
-        for (x = 0; x < v->width; ++x) {
-            r->sum += row[x];
-            if (row[x] < r->minimum) r->minimum = row[x];
-            if (row[x] > r->maximum) r->maximum = row[x];
+        for (x = 0; x < v->width; x += n) {
+            n = v->width - x > 65535u ? 65535u : v->width - x;
+            sg_stats_row(row + x, n, 255, &r->sum, &unused, &r->minimum, &r->maximum);
         }
     }
     return 0;

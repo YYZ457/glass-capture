@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include <getopt.h>
 #include <inttypes.h>
+#include <malloc.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -256,6 +257,12 @@ int main(int argc, char **argv)
     hardware.dev.fd = hardware.dev.lock_fd = -1;
 
     /* ---- 解析命令行 ---- */
+    /* 每块 32 MB 的缓冲区默认走 mmap：每收一块都要重新缺页 + 清零约 8000 页，等于多写一遍内存。
+     * 把 mmap 门槛提到 glibc 允许的上限（32 MiB，一块 16384 × 2000 = 32.77 MB 刚好在它之下），
+     * 并且不把堆还给系统 → 缓冲区在堆里循环使用，第一轮之后不再缺页。失败也无妨（只是慢回原样）。 */
+    (void)mallopt(M_MMAP_THRESHOLD, 32 * 1024 * 1024);
+    (void)mallopt(M_TRIM_THRESHOLD, 512 * 1024 * 1024);
+
     while ((c = getopt_long(argc, argv, "", args, NULL)) != -1) {
         switch (c) {
         case 's': source_name = optarg; break;

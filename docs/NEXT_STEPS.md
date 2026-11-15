@@ -1,4 +1,4 @@
-# 交接：现状和下一步（2026-11-14 晚，检测方案已补）
+# 交接：现状和下一步（2026-11-15）
 
 写给接手的 AI 助手（下一个会话、Fable、Gemini）和负责人。先读这一页，再按需读链接。
 
@@ -14,8 +14,8 @@
 | DMA 提速 `dma_fast=1` | 🟡 Gemini 已用内核树编出 ARM64 `.ko`（`f818b3f`，带 `dma_fast` 参数，vermagic 5.15.19-xilinx-v2022.1），**待上板** | I4「DMA 吞吐」 |
 | 测试图 / 调亮 / 15 kHz | 🟡 命令都写好了，**待上板** | BRINGUP 5⅞、5⁹ |
 | 图偏暗、第 6/7 位从没出现 | ❓ 光不够还是丢位，测试图一拍就知道 | 第 11 节 |
-| 检测方案 | 🟡 设计第 1 版已出：`docs/design/detection_plan.md`。待负责人回答 12 个问题、采购光源和样片 | 本文第 4 节 |
-| 处理线程吞吐 | ⚠️ `sg_stats` / `sg_candidates` 在 A53 上估计只有 60–150 MB/s，**`dma_fast` 生效后会变成新瓶颈（队列满）** | 方案第 4.2 节 |
+| 检测方案 | 🟡 第 1.1 版：`docs/design/detection_plan.md`。负责人已确认：至少检出 30 µm、不区分正反面、有传送带无编码器、视场略大于 80 mm。还缺玻璃厚度、镜头、光源等 | 本文第 4 节 |
+| 处理线程吞吐 | 🟡 `sg_stats` 已改 NEON（原来估计只有 90–150 MB/s，会在 `dma_fast` 生效后卡住队列）；`sg_candidates` 仍然慢，由快筛 `sg_screen` 接替（已写，未接入）。**A53 上的实测待上板（一键测试第 8 步）** | 方案第 4.2 节 |
 
 **最终目标**：15 kHz × 16384 像素 = 246 MB/s，单线 Base 3 Tap（读一行 64.3 µs < 一行 66.7 µs）。
 速度依据见 `docs/decisions/D002_bandwidth.md`（视场 80 mm → 4.88 µm/像素，75 mm/s → 15.36 kHz）。
@@ -29,9 +29,9 @@
    ```
    必须看到 `Compile and target ABI checks passed.`。提交 `dist/glass-capture/` 推到 `main`。ABI 检查不过就把报错发回来。
 2. 用新 `dist/glass-capture/` 更新 SD 卡。只接第一根 Camera Link 线，不用网线。
-3. 中控台：00 → 01 → 02 → **S 一键上板测试**（约 3–5 分钟）。
+3. 中控台：00 → 01 → 02 → **S 一键上板测试**（约 4–6 分钟）。**拍实拍图那几步（第 4 步）请保持场景不动、画面里有亮有暗**（比如半边遮住），这样一张图就能算出相机的噪声模型。
    - 板上等价：`sh /tmp/sg3000-board/board_session.sh`
-   - 它依次做：驱动 `cam_serial=1` → 相机和卡切 Base 3 Tap / 16384 → 测试图 3 / 2 / 1（板上逐像素判渐变、查 8 个位）→ 实拍：默认、曝光 50 / 90 µs、模拟增益 4 → 30 秒连续采集（旧 DMA）→ 重载 `dma_fast=1`，测试图验数据 + 30 秒连续采集 → `LineRate 15000` + 30 秒连续采集。
+   - 它依次做：驱动 `cam_serial=1` → 相机和卡切 Base 3 Tap / 16384 → 测试图 3 / 2 / 1（板上逐像素判渐变、查 8 个位）→ 实拍：默认、曝光 50 / 90 µs、模拟增益 4 → 30 秒连续采集（旧 DMA）→ 重载 `dma_fast=1`，测试图验数据 + 30 秒连续采集 → `LineRate 15000` + 30 秒连续采集 → CPU 基准（`bench`，单跑 + 三个同时跑，不碰采集卡）。开头还会只读 5 个相机寄存器（FFC / TDI / 位移）。
    - 全部断电恢复：从不写相机 UserSetSave、卡 DeviceReboot / ManualFPGAReload。
 4. 结果自动取回 `D:\SG3000_Captures\board-session\sg3000-session-*\`（`session.log`、`summary.txt`、缩略图）。**整个文件夹发给 Claude。**
 
@@ -39,7 +39,10 @@
 - `Ramp ramp: x%256=MATCH`（或另外两个公式之一 MATCH）且 `missing=none` → 链路逐位正确。`missing=6,7` → 最高两位丢了，先查这个。
 - `StreamSummary ... discontinuities=0`，`received` ≈ 秒数 × 行频 ÷ 2000，`wait_ms` 占大头 → 吞吐够。
 - `dma_stats`：`wait_us` 大 = 等 PCIe；`copy_us` 大 = 拷贝慢（下一步做零拷贝）。
-- **`ended` 行里 `error=-105`（ENOBUFS）且 `queue_full_events=1`**：不是 DMA 的问题，是处理线程（`--processor stats`）跟不上，队列满了。这种情况下 `received ÷ elapsed_ms` 仍然是 DMA 的真实吞吐下限。原因和修法见方案第 4.2 节、第 9 节第 1 项。
+- `StreamSummary` 里 `queue_full=1`、`error=-105`（脚本会接着打印 `StreamHint ... queue full`）：不是 DMA 的问题，是处理线程跟不上，队列满了。`sg_stats` 已提速，按估计不该再出现；出现了就看最后的 `Bench name=stats ... x15k=`。
+- `Bench name=... x15k=`：这个环节一个 A53 核的速度是 15 kHz 数据率的多少倍。`stats` 和 `screen` 应明显大于 1；`candidates` 预计小于 1（已知，方案第 4.2 节）。`Bench x3` 是三个同时跑，比单跑慢很多说明内存带宽是瓶颈。
+- `PGMNoiseFit scene-... e_per_dn=`：每个 DN 对应多少电子（方案假设 40）；`read_var` 开方是读出噪声（DN）。显示 `none` = 画面亮度不够多样或场景在动，这张图算不了，不是故障。
+- `CamReg FFCEnable / TDIStage / TDIMode / DigitalShift / BlackLevelMode`：相机当前设置，原样发回。
 - `camera-set LineRate 15000` 被拒 → 日志里有相机允许的范围。D002 估算单线余量只有约 3.6%，相机最短行周期可能卡在 15 kHz 附近；被拒就用它给的上限，或者和导师确认能否降到约 14 kHz（70 mm/s）。
 
 ## 3. 协作规则（避免冲突）
@@ -57,7 +60,8 @@
 - 30 µm = 6 像素，分辨率不是瓶颈；难点是**颗粒透明**、**景深只有 ±65 µm**、**光通量差一个数量级以上**（现在图暗多半是这个，不只是曝光）。
 - 先搭明场透射，再用同一块真值样片试低角度暗场，按对比噪声比二选一（方案第 2.4 节）。
 - 单线 Base 3 Tap 只能 Mono8，够用。
-- 现有处理器在 A53 上跟不上 246 MB/s；换成"每列一对 8 位阈值 + NEON 快筛"后估计只占一个核的 20–40%，**不需要 PL**。
+- 现有 `sg_candidates` 在 A53 上跟不上 246 MB/s；换成"每列一对 8 位阈值 + NEON 快筛"（`sg_screen`，已写）后估计只占一个核的 20–40%，**不需要 PL**。
+- 两面的颗粒都要检 → 焦点对在玻璃厚度中间；没有编码器 → 内触发 + 用样片标定速度；玻璃边缘在画面里 → 自动找边留边距。
 - 验收数字来自真值样片 + `verify/V4`；宣称"检出率 ≥ 99%"需要 ≥ 300 个真值颗粒。
 - 最紧的是光源和样片的采购周期（路线图 M2）。
 
@@ -69,10 +73,7 @@ python -I host/detect/study_detectability.py
 
 重算方案里的表。`sim_particles.py` 生成"图 + 干净图 + 真值"，`detect_v1.py` 是下一版算法的原型（**不是** `sg_candidates` 的参考实现，那份合同不变），用法见方案附录 A。
 
-**等负责人决定的事**：
-
-1. 回答方案第 10 节的 12 个问题（验收口径、镜头、光源、玻璃、颗粒、运动方式……）。
-2. 是否同意在下次上板前改板上代码（方案第 9 节第 1 项）：修处理线程瓶颈、加 `bench` 和噪声统计。不改也能上板，只是连续采集测试可能因队列满提前结束。
+**等负责人回答的事**（方案第 10 节）：玻璃厚度（最要紧，两面都要检）、镜头型号和光圈、现在的光源、颗粒是不是玻璃屑、有没有漏检 / 误检指标；并启动高亮线光源和真值样片的采购。
 
 ## 5. 其他待办（按优先级）
 

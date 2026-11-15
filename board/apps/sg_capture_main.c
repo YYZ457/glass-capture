@@ -42,6 +42,7 @@
 #include "cam_xml.h"
 #include "cam_set.h"
 #include "sg_pgmcheck.h"
+#include "sg_bench.h"
 #include "sg_mailbox.h"
 #include "sg3000_regs.h"
 #include "sg_err.h"
@@ -72,6 +73,7 @@ static void usage(void)
          "         ExposureTime <us>, DigitalGain <0.10..15.99>, AnalogGain 0..4 (=1.25/1.75/2/3/4x), LineRate <Hz>\n"
          "         other camera commands are read-only; all need insmod sg3000_rx.ko cam_serial=1, default baud 115200\n"
          "       sg3000-capture pgm-stats FILE.pgm [--thumb OUT.pgm] [--thumb-factor 16]   (no card access)\n"
+         "       sg3000-capture bench [--repeat 3]   (CPU speed of the processing stages, no card access)\n"
          "       sg3000-capture card-set NAME VALUE [--device PATH]\n"
          "         NAME: CameraWidth CameraHeight DeviceTapGeometry ClConfiguration CameraScanType\n"
          "       sg3000-capture version\n"
@@ -689,6 +691,28 @@ static int pgm_stats_main(int argc, char **argv)
         }
         printf("\nPGMFlat all0=%s all255=%s\n", c.all_zero ? "yes" : "no", c.all_255 ? "yes" : "no");
     }
+    if (!ret && frame.height >= 2) {       /* 噪声模型：只对静止场景有意义，见 sg_pgmcheck.h */
+        struct sg_pgm_noise nz;
+
+        ret = sg_pgm_noise(frame.data, frame.width, frame.height, &nz);
+        for (k = 0; !ret && k < SG_NOISE_BINS; ++k) {
+            if (nz.bin[k].columns)
+                printf("PGMNoise %s bin=%u-%u columns=%u mean=%.3f var_diff=%.4f var_total=%.4f\n", argv[2],
+                       nz.bin[k].lo, nz.bin[k].hi, nz.bin[k].columns, nz.bin[k].mean, nz.bin[k].var_diff,
+                       nz.bin[k].var_total);
+        }
+        if (!ret) {
+            printf("PGMNoiseTap %s mean=%.3f/%.3f/%.3f var=%.4f/%.4f/%.4f saturated_columns=%u\n", argv[2],
+                   nz.tap_mean[0], nz.tap_mean[1], nz.tap_mean[2], nz.tap_var[0], nz.tap_var[1], nz.tap_var[2],
+                   nz.saturated_columns);
+            if (nz.fit_ok)
+                printf("PGMNoiseFit %s bins=%u read_var=%.4f slope=%.5f e_per_dn=%.1f\n", argv[2], nz.fit_bins,
+                       nz.read_var, nz.slope, 1.0 / nz.slope);
+            else
+                printf("PGMNoiseFit %s bins=%u none (need >= 3 brightness levels with a positive slope)\n",
+                       argv[2], nz.fit_bins);
+        }
+    }
     if (!ret && thumb) {
         uint32_t tw = 0, th = 0;
         memset(&small, 0, sizeof small);
@@ -829,6 +853,11 @@ int main(int argc, char **argv)
     }
     if (!strcmp(argv[1], "camera-set")) {
         return camera_set_main(argc, argv);
+    }
+    if (!strcmp(argv[1], "bench")) {
+        int r = sg_bench_main(argc, argv);
+        if (r == 2) usage();
+        return r;
     }
     if (!strcmp(argv[1], "pgm-stats")) {
         return pgm_stats_main(argc, argv);

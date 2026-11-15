@@ -1,7 +1,8 @@
 #!/bin/sh
 # SPDX-License-Identifier: MIT
 #
-# board_session.sh —— 下次上板一条命令跑完 BRINGUP 第 5⅞ 节（测试图 + 调亮）和第 5⁹ 节（DMA 吞吐 + 15 kHz）。
+# board_session.sh —— 下次上板一条命令跑完 BRINGUP 第 5⅞ 节（测试图 + 调亮）和第 5⁹ 节（DMA 吞吐 + 15 kHz），
+# 外加检测方案（docs/design/detection_plan.md）要的两样实测：噪声模型（每张实拍图的 PGMNoise 行）和 CPU 处理速度（bench）。
 #
 # 用法（板上，先做过中控台「02 从 SD 加载程序」）：
 #   sh /tmp/sg3000-board/board_session.sh [--seconds 30] [--exposures "50 90"] [--skip-15k]
@@ -62,10 +63,11 @@ last() { grep "$1" "$LOG" | tail -n 1; }
 finish() {
     say ""
     say "== Summary: $FAILS step(s) failed; dma_fast tested: $FAST =="
-    grep -E '^(Shot|Ramp|PGMFlat|DMAStats|CameraSet|CameraValue|dma_stats|CardSet|StreamSummary|LineRateHz|  FAIL|  SKIP|Refused)' "$LOG" \
-        | sed 's#/tmp/sg3000-session-[0-9-]*/##' > "$OUT/summary.txt"
+    grep -E '^(Shot|Ramp|PGMFlat|PGMNoise|DMAStats|CameraSet|CameraValue|CamReg|dma_stats|CardSet|StreamSummary|StreamHint|LineRateHz|Bench|  FAIL|  SKIP|Refused)' "$LOG" \
+        | grep -v -E '^PGMNoise[A-Za-z]* [^ ]*(ramp|white|black)\.pgm' \
+        | sed 's#/tmp/sg3000-session-[0-9-]*/##' > "$OUT/summary.txt"       # 测试图是纯数字图，噪声行没意义，不进摘要
     # 终端只列最要紧的：失败项、测试图是否吻合、位统计、吞吐
-    grep -E '^(  FAIL|  SKIP|StreamSummary|Shot|Ramp|Refused)' "$OUT/summary.txt" | sed 's/^/  /'
+    grep -E '^(  FAIL|  SKIP|StreamSummary|StreamHint|Shot|Ramp|Refused|PGMNoiseFit scene|Bench name)' "$OUT/summary.txt" | sed 's/^/  /'
     name=$(basename "$OUT")
     ( cd /tmp && tar -cf - "$name/session.log" "$name/summary.txt" $(cd /tmp && ls "$name"/*.thumb.pgm 2>/dev/null) ) \
         | gzip -c > "$OUT.tar.gz"
@@ -97,14 +99,23 @@ shot() {
 # 测试图那几张再记一行"和哪个公式吻合"
 ramp_line() { echo "Ramp $1: $(last '^PGMRamp' | sed 's/^PGMRamp //')" >> "$LOG"; say "        $(last '^PGMRamp')"; }
 
+# 从 ended 那一行里取一个字段的值（数字，带不带引号都行）
+jfield() { echo "$ended" | sed -n "s/.*\"$1\":\"\{0,1\}\(-\{0,1\}[0-9][0-9]*\).*/\1/p"; }
+
 # 连续采集 RUN_SECONDS 秒；$1 = 标签
 stream_test() {
     [ -w "$PCI/dma_stats" ] && echo 0 > "$PCI/dma_stats"
     check "stream  $1 (${RUN_SECONDS} s)" "$STREAM" --source hardware --processor stats \
         --seconds "$RUN_SECONDS" --queue 4 --max-frame-mib 48
-    summary=$(last '"event":"ended"' | sed -n 's/.*"received":"\([0-9]*\)".*"id_discontinuities":"\([0-9]*\)".*"elapsed_ms":"\([0-9]*\)".*"dma_chunk":\([0-9]*\).*"dma_bytes":"\([0-9]*\)".*"dma_ms":"\([0-9]*\)".*"wait_ms":"\([0-9]*\)".*/received=\1 discontinuities=\2 elapsed_ms=\3 chunk=\4 dma_bytes=\5 dma_ms=\6 wait_ms=\7/p')
+    ended=$(last '"event":"ended"')
+    summary="error=$(jfield error) received=$(jfield received) processed=$(jfield processed) discontinuities=$(jfield id_discontinuities) queue_full=$(jfield queue_full_events) queue_peak=$(jfield queue_peak) elapsed_ms=$(jfield elapsed_ms) chunk=$(jfield dma_chunk) dma_bytes=$(jfield dma_bytes) dma_ms=$(jfield dma_ms) wait_ms=$(jfield wait_ms)"
     echo "StreamSummary $1 $summary" >> "$LOG"
     say "        $summary"
+    if [ "$(jfield queue_full_events)" != 0 ] && [ -n "$(jfield queue_full_events)" ]; then
+        # 队列满 = 处理线程比 DMA 慢，不是 DMA / 采集卡的问题；这时 bytes ÷ elapsed 仍是 DMA 吞吐的下限
+        echo "StreamHint $1 queue full: the processing thread is slower than DMA (not a DMA / card fault)" >> "$LOG"
+        say "        queue full: processing thread slower than DMA (see Bench lines at the end)"
+    fi
     if [ -r "$PCI/dma_stats" ]; then
         echo "dma_stats $1 $(cat "$PCI/dma_stats")" >> "$LOG"
         say "        dma_stats $(cat "$PCI/dma_stats")"
@@ -124,6 +135,14 @@ say "-- 1. driver (coherent DMA), status, camera"
 load_driver "" || { say "  FAIL  insmod / device node"; FAILS=$((FAILS + 1)); finish 1; }
 check "sg_status" "$STATUS"
 check "camera-probe" "$APP" camera-probe || finish 1
+# 只读：相机现在开没开 FFC / TDI、取哪 8 位（地址来自相机 XML；检测方案第 9 节）。读不出不算失败。
+for reg in FFCEnable:0x01102000 TDIStage:0x01106008 TDIMode:0x0110600C DigitalShift:0x01207040 BlackLevelMode:0x0120C054; do
+    if run "$APP" camera-read "${reg#*:}" 4; then
+        echo "CamReg ${reg%%:*} $(last '^CameraRead')" >> "$LOG"
+    else
+        echo "CamReg ${reg%%:*} read failed" >> "$LOG"
+    fi
+done
 
 # ---- 2. B 方案：相机和卡都 Base 3 Tap，宽 16384 ------------------------------
 say "-- 2. Base 3-tap, width 16384 (camera + card)"
@@ -177,6 +196,16 @@ if [ "$DO_15K" = 1 ]; then
         stream_test "$( [ $FAST = 1 ] && echo fast || echo coherent )-15k"
         shot scene-15k
     fi
+fi
+
+# ---- 8. CPU 处理速度（不碰采集卡）-------------------------------------------
+# x15k < 1 = 这个环节一个核跟不上 15 kHz。先单独跑一次，再同时跑 3 个（看几个核一起用时内存带宽够不够）。
+say "-- 8. CPU benchmark (no card access)"
+if check "bench x1" "$APP" bench; then
+    for i in 1 2 3; do "$APP" bench > "$OUT/bench-p$i.txt" 2>&1 & done
+    wait
+    for i in 1 2 3; do sed "s/^Bench name=/Bench x3 p$i name=/" "$OUT/bench-p$i.txt" >> "$LOG"; rm -f "$OUT/bench-p$i.txt"; done
+    say "  OK    bench x3 (three at once; details in summary.txt)"
 fi
 
 finish $([ $FAILS = 0 ] && echo 0 || echo 1)

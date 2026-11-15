@@ -41,6 +41,10 @@ struct sg_processor {
     void (*close)(void *);
 };
 int sg_stats_open(struct sg_processor *, uint32_t threshold);
+/* 一行（n <= 65535 个像素）的灰度统计，累加进调用者的变量：总和、大于 threshold 的个数、最小、最大。
+ * ARM64 上是 NEON。sg_stats 和 sg_candidates 的处理器都用它。 */
+void sg_stats_row(const unsigned char *row, uint32_t n, uint32_t threshold,
+                  uint64_t *sum, uint64_t *above, uint32_t *min, uint32_t *max);
 int sg_pl_open(struct sg_processor *, const char *device);
 int sg_view_validate(const struct sg_image_view *);
 #endif

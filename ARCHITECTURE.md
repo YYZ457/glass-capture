@@ -70,7 +70,7 @@ apps ─▶ stream ─▶ processing
 |---|---|---|
 | `sg_processing.h` | 处理器接口 | ✅ 原样 |
 | `sg_view.c` | 输入合法性检查 | 🟡 已迁移，电脑上测过 |
-| `sg_stats.c` | CPU 诊断统计（不是缺陷判定）| 🟡 已迁移，电脑上测过 |
+| `sg_stats.c` | CPU 诊断统计（不是缺陷判定）；ARM64 上内层循环是 NEON（`sg_stats_row`）| 🟡 单测通过（x86 + qemu-aarch64），A53 速度待 `bench` 实测 |
 | `sg_pl_backend.c` | PL 处理器 | 🟡 暂不迁移（D001）|
 | `sg_candidates` | 颗粒候选检测（第一版算法）| 🟡 已写，和 `host/detect/candidates.py` 输出一致；没对过真值 |
 
@@ -88,7 +88,9 @@ apps ─▶ stream ─▶ processing
 | `cam_regs.h` | 相机寄存器地址 | ✅ 已用从相机读出的 16K XML 逐条核对（更正波特率地址、时钟 96 MHz）|
 | `cam_serial` | 串口邮箱初始化 / 收发 / 波特率 + GenCP 读写 | ✅ 实机 `cam_serial=1` + `port=0, baud=115200` 读出 `JAI / SW-WS2-CL16K-50M-SDE`；单路卡禁碰 port1（见 `docs/bringup_report_2026-11-14.md`） |
 | `cam_xml` | GenCP 清单表 → 从相机本身读 GenICam XML；按块读内存（重试 + 清残留）| ✅ 实板读出相机 XML（18,279 B，2 s）|
-| `processing/sg_pgmcheck` | 板上查图：亮度分位、8 个位、测试图渐变公式、缩略图（`sg3000-capture pgm-stats`）| 🟡 单测通过 |
+| `processing/sg_pgmcheck` | 板上查图：亮度分位、8 个位、测试图渐变公式、缩略图、噪声模型（均值—方差，`PGMNoise`）（`sg3000-capture pgm-stats`）| 🟡 单测通过 |
+| `processing/sg_screen` | 快筛：每列一对 8 位阈值，NEON 一次比 16 个像素，输出命中段（检测方案第 4.3 节第 ① 级）| 🟡 单测通过；只有 `bench` 在用，未接入 `sg3000-stream` |
+| `apps/sg_bench.c` | `sg3000-capture bench`：各处理环节在本机的 MB/s（不碰采集卡）| 🟡 x86 / qemu 跑过 |
 | `cam_set` | `camera-set` 白名单 + 换算（CL 模式、Tap、测试图、曝光、数字/模拟增益）| 🟡 单测通过；CL 模式 / Tap 已实板写通，其余待测 |
 | `cam_config` | 宽度、行频、曝光、触发、测试图案、User Set | 🟡 已写在 cam_serial 之上；地址待 16K XML 核对 |
 

@@ -2,6 +2,7 @@
  *
  * sg_pgmcheck.c —— 见 sg_pgmcheck.h。一遍扫完整张图（16384 × 2000 = 32 MB 在 A53 上约 0.1–0.3 秒）。
  */
+#include <stdlib.h>
 #include <string.h>
 
 #include "sg_pgmcheck.h"
@@ -90,5 +91,97 @@ int sg_pgm_thumb(const uint8_t *img, uint32_t width, uint32_t height, uint32_t f
     }
     *out_w = tw;
     *out_h = th;
+    return 0;
+}
+
+/* 档位边界：暗处分得细（现在的实拍图最大灰度只有十几），亮处分得粗。 */
+static const uint32_t noise_edges[SG_NOISE_BINS + 1] = {
+    0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 160, 192, 224, 256,
+};
+
+int sg_pgm_noise(const uint8_t *img, uint32_t width, uint32_t height, struct sg_pgm_noise *out)
+{
+    uint64_t *sum, *sq, *dsq;
+    uint8_t *sat;
+    uint32_t tap_n[3] = { 0, 0, 0 }, x, y, b;
+    double sw = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
+
+    if (!img || !out || width == 0 || height < 2) return -EINVAL;
+    memset(out, 0, sizeof *out);
+    sum = calloc(width, sizeof *sum);
+    sq = calloc(width, sizeof *sq);
+    dsq = calloc(width, sizeof *dsq);
+    sat = calloc(width, 1);
+    if (!sum || !sq || !dsq || !sat) {
+        free(sum); free(sq); free(dsq); free(sat);
+        return -ENOMEM;
+    }
+    for (y = 0; y < height; ++y) {
+        const uint8_t *row = img + (size_t)y * width;
+        const uint8_t *next = y + 1 < height ? row + width : NULL;
+        for (x = 0; x < width; ++x) {
+            uint32_t v = row[x];
+            sum[x] += v;
+            sq[x] += v * v;
+            sat[x] |= v == 255;
+            if (next) {
+                int32_t d = (int32_t)next[x] - (int32_t)v;
+                dsq[x] += (uint32_t)(d * d);
+            }
+        }
+    }
+    for (b = 0; b < SG_NOISE_BINS; ++b) {
+        out->bin[b].lo = noise_edges[b];
+        out->bin[b].hi = noise_edges[b + 1];
+    }
+    for (x = 0; x < width; ++x) {
+        double mean = (double)sum[x] / height;
+        double total = (double)sq[x] / height - mean * mean;
+        double diff = (double)dsq[x] / (2.0 * (height - 1));
+        struct sg_noise_bin *bin;
+
+        if (sat[x]) {
+            out->saturated_columns++;
+            continue;
+        }
+        for (b = 0; b + 1 < SG_NOISE_BINS && mean >= noise_edges[b + 1]; ++b) {}
+        bin = &out->bin[b];
+        bin->columns++;
+        bin->mean += mean;
+        bin->var_diff += diff;
+        bin->var_total += total > 0 ? total : 0;
+        out->tap_mean[x % 3] += mean;
+        out->tap_var[x % 3] += diff;
+        tap_n[x % 3]++;
+    }
+    for (b = 0; b < 3; ++b) {
+        if (tap_n[b]) {
+            out->tap_mean[b] /= tap_n[b];
+            out->tap_var[b] /= tap_n[b];
+        }
+    }
+    /* 按列数加权的最小二乘直线 */
+    for (b = 0; b < SG_NOISE_BINS; ++b) {
+        struct sg_noise_bin *bin = &out->bin[b];
+        if (!bin->columns) continue;
+        bin->mean /= bin->columns;
+        bin->var_diff /= bin->columns;
+        bin->var_total /= bin->columns;
+        if (bin->columns >= 16) {
+            double w = bin->columns;
+            sw += w; sx += w * bin->mean; sy += w * bin->var_diff;
+            sxx += w * bin->mean * bin->mean; sxy += w * bin->mean * bin->var_diff;
+            out->fit_bins++;
+        }
+    }
+    if (out->fit_bins >= 3) {
+        double den = sw * sxx - sx * sx;
+        if (den > 1e-9 * sw * sxx) {
+            out->slope = (sw * sxy - sx * sy) / den;
+            out->read_var = (sy - out->slope * sx) / sw;
+            out->fit_ok = out->slope > 0;
+        }
+    }
+    free(sum); free(sq); free(dsq); free(sat);
     return 0;
 }
