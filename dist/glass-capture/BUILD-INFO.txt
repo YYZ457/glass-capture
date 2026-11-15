@@ -1,5 +1,5 @@
 glass-capture SD bundle
-source: d68cbf8
-built: 2026-11-15T00:52:24
+source: 1128e60
+built: 2026-11-15T08:59:17
 files: sg3000-capture, sg3000-stream, sg_status, board_session.sh, sg3000_rx.ko
 copy this whole folder to the root of the SD card's first (FAT) partition.
