@@ -5,9 +5,7 @@
 
 这是一份用 [Showboat](https://simonwillison.net/2026/Feb/10/showboat-and-rodney/) 生成的**可执行**演示文档：每个代码块都真实执行过，下面的输出是 Showboat 捕获的，不是手写的。复验方法（在仓库根目录）：
 
-```bash
-uvx showboat verify docs/demos/board_tests.md --workdir board
-```
+    uvx showboat verify docs/demos/board_tests.md --workdir board
 
 它会重跑所有命令并逐块对比输出；代码一改、行为一变，这里就会报 diff。
 
