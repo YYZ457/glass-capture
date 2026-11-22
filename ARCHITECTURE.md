@@ -121,7 +121,9 @@ apps ─▶ stream ─▶ processing
 | `host/detect/sim_particles.py`、`detect_v1.py`、`study_detectability.py` | 检测方案的依据：颗粒成像仿真、下一版算法的原型（只在电脑上跑）、可检性表 | 🟡 仿真条件下测过；默认参数多为假设，待实测替换 |
 | `docs/design/detection_plan.md` | 检测方案设计：光学、成像方式、算力、算法、验证、路线图 | 第 1 版 |
 | `fpga/` | 三个 HLS/RTL 包，原样保留，不细分（D001）| 🟡 |
-| `verify/V1-V4` | 测试图案、行完整性、暗场、真值比对 | 🟡 已写，合成图测过；V1 渐变公式待手册确认 |
+| `verify/V1-V4` | 测试图案、行完整性、暗场、真值比对（V4 可用 `--roi` 只数颗粒区的误报，并按尺寸列检出率）| 🟡 已写，合成图测过；V1 渐变公式待手册确认 |
+| `verify/plate_register.py` | 标定板配准：板上 mm 真值 → 图上像素真值（给 V4），并报像素尺寸、畸变、旋转、翻面、速度是否匹配 | 🟡 模拟扫描图测过（畸变、旋转、速度 ±5%、翻面掉头，颗粒最大误差 0.16 像素）；待真板 |
+| `tools/calib_target.py`、`docs/design/calib_target/` | 标定玻璃板 GC-CAL-01 版图生成（GDS / DXF / 真值）和设计说明 | 🟡 待厂家报价 |
 | `board/tests/` | 假卡测试、单元测试（`make -C board test`，x86 和 ARM64 模拟器都过）| 🟡 |
 | `tools/make_sd_bundle.py` | 交叉编译 → `dist/glass-capture/`（拷到 SD 卡）| 🟡 |
 | `dist/glass-capture/` | 编译好的 ARM64 板上程序 + SHA256SUMS | ✅ 已上板校验并运行 |
