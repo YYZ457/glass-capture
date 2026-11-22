@@ -18,7 +18,7 @@ struct sg_source {
 };
 struct sg_pipeline_options {
     unsigned queue_depth, processing_timeout_ms;
-    uint64_t max_blocks, duration_ms, max_frame_bytes;
+    uint64_t max_blocks, duration_ms, max_frame_bytes, max_bytes;
     int synthetic, strict_block_ids;
     volatile sig_atomic_t *cancel;
 };

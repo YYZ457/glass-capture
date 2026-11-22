@@ -25,8 +25,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
+
+#ifndef RENAME_NOREPLACE
+#define RENAME_NOREPLACE (1u << 0)
+#endif
 
 #include "sg_io_linux.h"
 #include "sg_acq.h"
@@ -128,12 +133,190 @@ static void usage(void)
 {
     puts("sg3000-stream 0.2 / interface ABI 1\n"
          "--source hardware|synthetic --processor stats|candidates --seconds 30 (0=until stopped)\n"
-         "--max-blocks 0 --queue 4 --max-frame-mib 16 --block-policy observe|strict\n"
+         "--max-blocks 0 --max-bytes 0 --queue 4 --max-frame-mib 16 --block-policy observe|strict\n"
          "--process-timeout-ms 2000 --emit-ms 1000 --threshold 128 (candidates: 25) --device PATH\n"
+         "--save-pgm PATH (stitch continuous blocks into one P5 PGM; fails if block IDs jump)\n"
          "Candidates: --min-area 2 --max-area 0 --max-candidates 4096 --background FILE.csv\n"
          "Network: --tcp IP[:PORT] (send candidates per block) --tcp-frame-every 0 (send raw block every N)\n"
          "Synthetic only: --width 256 --height 64 --synthetic-delay-ms 50\n"
-         "Output: SGJSON lines to stdout; no automatic image/result files or external actuation.");
+         "Output: SGJSON lines to stdout; image file written only when --save-pgm is given.");
+}
+
+/* ==== 连续长图出口：按块无丢行拼接写单个 P5 Mono8 PGM ========================= */
+
+#define PGM_STREAM_HDR_LEN 27
+
+struct pgm_stream {
+    int fd;
+    const char *path;
+    char *tmp_path;
+    uint32_t width;
+    uint64_t lines;
+    uint64_t total_bytes;
+    struct sg_result_sink next;
+};
+
+static int pgm_write_all(int fd, const void *data, size_t length)
+{
+    const unsigned char *p = data;
+
+    while (length) {
+        ssize_t n = write(fd, p, length);
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -errno;
+        }
+        if (n == 0) {
+            return -EIO;
+        }
+        p += n;
+        length -= (size_t)n;
+    }
+    return 0;
+}
+
+static int pgm_publish_file(const char *tmp_path, const char *path)
+{
+#ifdef SYS_renameat2
+    if (syscall(SYS_renameat2, AT_FDCWD, tmp_path, AT_FDCWD, path, RENAME_NOREPLACE) == 0) {
+        return 0;
+    }
+    if (errno != ENOSYS && errno != EINVAL) {
+        return -errno;
+    }
+#endif
+    if (link(tmp_path, path) == 0) {
+        (void)unlink(tmp_path);
+        return 0;
+    }
+    if (errno != EPERM && errno != ENOSYS && errno != EINVAL) {
+        return -errno;
+    }
+    if (access(path, F_OK) == 0) {
+        return -EEXIST;
+    }
+    if (rename(tmp_path, path) == 0) {
+        return 0;
+    }
+    return -errno;
+}
+
+static int pgm_stream_open(struct pgm_stream *ps, const char *path, struct sg_result_sink next)
+{
+    char header[PGM_STREAM_HDR_LEN + 1];
+    size_t len = strlen(path);
+    int n, ret;
+
+    memset(ps, 0, sizeof(*ps));
+    ps->fd = -1;
+    ps->path = path;
+    ps->next = next;
+
+    if (!len || len > SIZE_MAX - 16) {
+        return -EINVAL;
+    }
+    if (access(path, F_OK) == 0) {
+        return -EEXIST;
+    }
+    ps->tmp_path = malloc(len + 16);
+    if (!ps->tmp_path) {
+        return -ENOMEM;
+    }
+    snprintf(ps->tmp_path, len + 16, "%s.tmp", path);
+    ps->fd = open(ps->tmp_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (ps->fd < 0) {
+        ret = -errno;
+        free(ps->tmp_path);
+        ps->tmp_path = NULL;
+        return ret;
+    }
+    n = snprintf(header, sizeof(header), "P5\n%6u %12" PRIu64 "\n255\n", 0u, UINT64_C(0));
+    if (n != PGM_STREAM_HDR_LEN) {
+        close(ps->fd);
+        (void)unlink(ps->tmp_path);
+        free(ps->tmp_path);
+        ps->tmp_path = NULL;
+        return -EOVERFLOW;
+    }
+    ret = pgm_write_all(ps->fd, header, PGM_STREAM_HDR_LEN);
+    if (ret) {
+        close(ps->fd);
+        (void)unlink(ps->tmp_path);
+        free(ps->tmp_path);
+        ps->tmp_path = NULL;
+        return ret;
+    }
+    return 0;
+}
+
+static int pgm_stream_publish(void *context, const struct sg_image_view *v,
+                              const struct sg_processing_result *r, uint32_t timeout_ms)
+{
+    struct pgm_stream *ps = context;
+    int ret;
+
+    if (v->flags & SG_META_ID_DISCONTINUITY) {
+        return -EPROTO;
+    }
+    if (v->width == 0 || v->width > 999999u || v->height == 0 ||
+        ps->lines > UINT64_C(999999999999) - v->height) {
+        return -EOVERFLOW;
+    }
+    if (ps->width == 0) {
+        ps->width = v->width;
+    } else if (ps->width != v->width) {
+        return -EPROTO;
+    }
+    ret = pgm_write_all(ps->fd, v->pixels, v->bytes);
+    if (ret) {
+        return ret;
+    }
+    ps->lines += v->height;
+    ps->total_bytes = PGM_STREAM_HDR_LEN + (uint64_t)ps->width * ps->lines;
+    return ps->next.publish(ps->next.context, v, r, timeout_ms);
+}
+
+static int pgm_stream_close(struct pgm_stream *ps, int commit)
+{
+    char header[PGM_STREAM_HDR_LEN + 1];
+    int ret = 0, n;
+
+    if (!ps->tmp_path) {
+        return 0;
+    }
+    if (commit && ps->fd >= 0 && ps->width > 0 && ps->lines > 0) {
+        n = snprintf(header, sizeof(header), "P5\n%6u %12" PRIu64 "\n255\n", ps->width, ps->lines);
+        if (n != PGM_STREAM_HDR_LEN) {
+            ret = -EOVERFLOW;
+        } else if (lseek(ps->fd, 0, SEEK_SET) != 0) {
+            ret = -errno;
+        } else {
+            ret = pgm_write_all(ps->fd, header, PGM_STREAM_HDR_LEN);
+        }
+        if (!ret && fsync(ps->fd) != 0) {
+            ret = -errno;
+        }
+        if (close(ps->fd) != 0 && !ret) {
+            ret = -errno;
+        }
+        ps->fd = -1;
+        if (!ret) {
+            ret = pgm_publish_file(ps->tmp_path, ps->path);
+        }
+    } else {
+        if (ps->fd >= 0) {
+            close(ps->fd);
+            ps->fd = -1;
+        }
+    }
+    if (!commit || ret) {
+        (void)unlink(ps->tmp_path);
+    }
+    free(ps->tmp_path);
+    ps->tmp_path = NULL;
+    return ret;
 }
 
 /* 读 verify/V3 --save-background 写出的 CSV（表头 x,mean,sigma，x 从 0 连续）。 */
@@ -222,21 +405,25 @@ int main(int argc, char **argv)
 {
     static const struct option args[] = {
         {"source", 1, 0, 's'}, {"processor", 1, 0, 'p'}, {"seconds", 1, 0, 'd'},
-        {"max-blocks", 1, 0, 'n'}, {"queue", 1, 0, 'q'}, {"max-frame-mib", 1, 0, 'm'},
-        {"block-policy", 1, 0, 'b'}, {"process-timeout-ms", 1, 0, 't'},
-        {"emit-ms", 1, 0, 'e'}, {"threshold", 1, 0, 'r'}, {"width", 1, 0, 'w'},
-        {"height", 1, 0, 'h'}, {"synthetic-delay-ms", 1, 0, 'i'}, {"device", 1, 0, 'D'},
+        {"max-blocks", 1, 0, 'n'}, {"max-bytes", 1, 0, 'M'}, {"queue", 1, 0, 'q'},
+        {"max-frame-mib", 1, 0, 'm'}, {"block-policy", 1, 0, 'b'},
+        {"process-timeout-ms", 1, 0, 't'}, {"emit-ms", 1, 0, 'e'},
+        {"threshold", 1, 0, 'r'}, {"width", 1, 0, 'w'}, {"height", 1, 0, 'h'},
+        {"synthetic-delay-ms", 1, 0, 'i'}, {"device", 1, 0, 'D'},
+        {"save-pgm", 1, 0, 'O'},
         {"min-area", 1, 0, 'A'}, {"max-area", 1, 0, 'B'}, {"max-candidates", 1, 0, 'C'},
         {"background", 1, 0, 'G'}, {"tcp", 1, 0, 'T'}, {"tcp-frame-every", 1, 0, 'F'},
         {"version", 0, 0, 'v'}, {"help", 0, 0, '?'}, {0, 0, 0, 0}};
     const char *source_name = "hardware", *processor_name = "stats";
     const char *device = SG_DEFAULT_DEVICE, *background_path = NULL, *tcp_target = NULL;
+    const char *save_pgm_path = NULL;
     struct sg_candidate_params cand = { 0, 2, 0, 4096 };
     struct tx_tcp tcp = { -1, 0 };
     struct tx_tcp_sink tcp_sink;
+    struct pgm_stream pgm;
     float *bg_mean = NULL;
     uint32_t bg_width = 0, frame_every = 0;
-    int threshold_given = 0;
+    int threshold_given = 0, pgm_opened = 0;
     struct sg_pipeline_options o = {
         .queue_depth = 4, .processing_timeout_ms = 2000, .max_blocks = 0,
         .duration_ms = 30000, .max_frame_bytes = 16u * 1024u * 1024u, .cancel = &stopped };
@@ -269,6 +456,7 @@ int main(int argc, char **argv)
         case 'p': processor_name = optarg; break;
         case 'd': o.duration_ms = number(optarg, 86400) * 1000; break;
         case 'n': o.max_blocks = number(optarg, UINT64_MAX); break;
+        case 'M': o.max_bytes = number(optarg, UINT64_MAX); break;
         case 'q': o.queue_depth = (unsigned)number(optarg, 16); break;
         case 'm': o.max_frame_bytes = number(optarg, 256) * 1024u * 1024u; break;
         case 'b':
@@ -290,6 +478,7 @@ int main(int argc, char **argv)
         case 'h': synthetic.height = (uint32_t)number(optarg, 32768); break;
         case 'i': synthetic.delay = (uint32_t)number(optarg, 10000); break;
         case 'D': device = optarg; break;
+        case 'O': save_pgm_path = optarg; break;
         case 'v': puts("sg3000-stream 0.2 ABI 1"); return 0;
         default:
             usage();
@@ -369,6 +558,15 @@ int main(int argc, char **argv)
         tcp_sink.next = sink;
         tx_tcp_sink(&tcp_sink, &sink);
     }
+    if (save_pgm_path) {
+        ret = pgm_stream_open(&pgm, save_pgm_path, sink);
+        if (ret) {
+            fprintf(stderr, "Cannot open output PGM %s: %s\n", save_pgm_path, strerror(-ret));
+            goto done;
+        }
+        pgm_opened = 1;
+        sink = (struct sg_result_sink){ &pgm, pgm_stream_publish };
+    }
     if (o.synthetic) {
         source = (struct sg_source){ &synthetic, synthetic_next, synthetic_stop };
     } else {
@@ -400,6 +598,27 @@ done:
             if (!ret) {
                 ret = e;
             }
+        }
+    }
+    if (pgm_opened) {
+        int commit = (ret == 0 && stats.id_discontinuities == 0 &&
+                      stats.queue_full_events == 0 && pgm.lines > 0);
+        e = pgm_stream_close(&pgm, commit);
+        if (e) {
+            stats.output_error = e;
+            if (!ret) {
+                ret = e;
+            }
+        } else if (commit) {
+            snprintf(line, sizeof(line),
+                     "SAVED_PGM width=%u height=%" PRIu64 " bytes=%" PRIu64 " path=%s\n",
+                     pgm.width, pgm.lines, pgm.total_bytes, pgm.path);
+            e = tx_jsonl_emit(line, 2000);
+            if (!ret) {
+                ret = e;
+            }
+        } else if (!ret) {
+            ret = pgm.lines == 0 ? -ENODATA : -EPROTO;
         }
     }
     snprintf(line, sizeof(line),

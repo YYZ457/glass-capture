@@ -240,6 +240,13 @@ int sg_pipeline_run(struct sg_source *src, struct sg_processor *proc, struct sg_
             ret = st->source_error = -EPROTO;
             break;
         }
+        if (o->max_bytes && item.frame.length > o->max_bytes - st->bytes) {
+            sg_capture_frame_free(&item.frame);
+            if (st->received == 0) {
+                ret = st->source_error = -ENOSPC;
+            }
+            break;
+        }
 
         item.view.pixels        = item.frame.data;
         item.view.sequence      = st->received + 1u;

@@ -78,7 +78,7 @@ apps ─▶ stream ─▶ processing
 
 | 文件 | 职责 | 状态 |
 |---|---|---|
-| `sg_pipeline` | 采集线程 → 有界队列 → 处理线程 | 🟡 已迁移，合成数据测过，没上板 |
+| `sg_pipeline` | 采集线程 → 有界队列 → 处理线程（含 `max_bytes` 字节上限停机）| ✅ 实机 5000 Hz × 20s（50 块，`id_discontinuities=0`，`queue_full_events=0`）通过 |
 | `sg_linecheck` | 块号连续性、累计行数、实际行频 | 🟡 已写，电脑上测过（还没接进程序）|
 
 ### board/camera_ctrl/ — 相机控制（I7）
@@ -107,7 +107,7 @@ apps ─▶ stream ─▶ processing
 |---|---|---|
 | `sg_status.c` | `sg_status` 只读体检；`--card-xml DIR` 读卡 XML | ✅ 实机体检与 `--card-xml` 读出均通过 |
 | `sg_capture_main.c` | `sg3000-capture` 单帧；`send` 经网口发图；`card-set` / `camera-set`（白名单 + 读回）；`camera-probe` / `camera-xml` / `camera-regs` / `camera-read`（只读）；失败时打印 `FailedStage` / `LastHeader`；`version` | ✅ `preflight` / `capture`（4096×2000 及 Base 1X3 `16384×2000`）/ `version` / `card-set` / `camera-set` / `camera-probe`（port0）实机全部通过 |
-| `sg_stream_main.c` | `sg3000-stream` 连续；`--processor candidates`、`--tcp` | ✅ 合成源与真机 `--source hardware --processor stats`（`16384×2000`，`stop_error=0`）均实机通过 |
+| `sg_stream_main.c` | `sg3000-stream` 连续；`--processor candidates`、`--tcp`、`--save-pgm` / `--max-bytes` 短录长图 | ✅ 实机 `stats` 5000 Hz × 20s（`16384×100000`，`id_discontinuities=0`，`stop_error=0`）与 `SAVED_PGM` 通过 |
 | `board/scripts/board_session.sh` | 一键上板测试（BRINGUP 5⅞ + 5⁹），结果打包 | 🟡 busybox ash 下对假板子跑通；待上板 |
 | `pgm_write` | 原子写 PGM | 🟡 已写，电脑上测试通过 |
 

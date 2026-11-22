@@ -21,6 +21,7 @@
     <button class="tool" id="stop" title="停止当前操作" disabled><svg viewBox="0 0 20 20"><rect x="5" y="5" width="10" height="10" rx="1.5"/></svg><span>停止</span></button>
     <span class="tool-sep"></span>
     <button class="tool" id="fetch" title="把板上最新的一帧传回电脑（网口约 1 秒，串口约 7 分钟）"><svg viewBox="0 0 20 20"><path d="M10 3v9M6 8.5l4 4 4-4M4 16h12"/></svg><span>保存到电脑</span></button>
+    <button class="tool" id="save-sd" title="把板上最新一帧写入 SD 卡根目录并 sync/卸载，之后可断电拔卡到电脑「图像 → 打开 PGM…」读取"><svg viewBox="0 0 20 20"><path d="M5 3.5h7.5L16 7v9.5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-13a1 1 0 0 1 1-1z"/><path d="M7 3.5v4h5v-4M7.5 11.5h5v4h-5z"/></svg><span>存到 SD 卡</span></button>
   </div>
   <div class="appbar-right">
     <button class="device-btn" id="device-btn" aria-haspopup="true" aria-expanded="false"><span class="dot" id="device-dot"></span><span id="device-label">未连接</span><svg class="caret" viewBox="0 0 10 10"><path d="M2.5 4l2.5 2.5L7.5 4"/></svg></button>
@@ -106,7 +107,7 @@
               <label class="btn sm file-button">打开 PGM…<input id="pgm" type="file" accept=".pgm"></label>
             </span>
           </div>
-          <div class="viewer"><div class="empty" id="image-empty">没有图像</div><canvas id="image" hidden></canvas></div>
+          <div class="viewer"><div class="empty" id="image-empty">没有图像（可点「保存到电脑」，或用「存到 SD 卡」断电拔卡后点右上方「打开 PGM…」读取）</div><canvas id="image" hidden></canvas></div>
           <p class="fine path" id="board-frame" hidden></p>
         </div>
       </div>
@@ -210,6 +211,13 @@
           <button class="btn grow" id="stream-stop" disabled>停止</button>
         </div>
         <button class="btn sm ghost block" id="replay" title="回放随包的合成记录，不碰硬件">离线回放（合成数据）</button>
+        <div class="prop-sep">短录长图（存 SD 卡）</div>
+        <div class="prop"><label for="short-seconds">短录时长</label>
+          <div class="ctl"><input id="short-seconds" type="number" min="1" max="60" step="1" value="20"><span class="unit">秒</span></div></div>
+        <div class="prop"><label for="short-mode">写入路径</label>
+          <div class="ctl"><select id="short-mode"><option value="ram_sd">先录内存再存 SD（防丢块 · 5 kHz 推荐）</option><option value="direct_sd">极低速直写 SD（仅 ≤1.5 kHz）</option></select></div></div>
+        <p class="fine" id="short-hint">会连续拼接所有采集块并写回 SD 卡；若发生丢块会自动中止。</p>
+        <button class="btn primary block" id="start-short">短录并存 SD 卡</button>
       </div>
     </aside>
   </section>

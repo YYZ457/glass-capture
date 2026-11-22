@@ -169,7 +169,7 @@ class Console:
                 text = decoder.decode(chunk)
                 with self.cv:
                     self.rx = (self.rx + text)[-25_000_000:]
-                    if self.job and self.job.get('action') == 'stream' and self.busy:
+                    if self.job and self.job.get('action') in {'stream', 'short_record'} and self.busy:
                         self.stream_lines = (self.stream_lines + text)[-12000:]
                         while '\n' in self.stream_lines:
                             line, self.stream_lines = self.stream_lines.split('\n', 1)
@@ -291,7 +291,7 @@ class Console:
         return output
 
     def start(self, action, options=None):
-        if action not in {'probe', 'prepare', 'preflight', 'capture', 'fetch_last', 'dmesg', 'release', 'prepare_stream', 'stream', 'replay', 'status', 'network', 'card_xml', 'card_set', 'camera_probe', 'camera_xml', 'camera_regs', 'camera_set', 'board_session',
+        if action not in {'probe', 'prepare', 'preflight', 'capture', 'fetch_last', 'save_sd', 'dmesg', 'release', 'prepare_stream', 'stream', 'short_record', 'replay', 'status', 'network', 'card_xml', 'card_set', 'camera_probe', 'camera_xml', 'camera_regs', 'camera_set', 'board_session',
                           'camera_get', 'camera_preset', 'snap', 'live', 'driver', 'bench'}:
             raise ValueError('未知操作。')
         with self.lock:
@@ -306,7 +306,7 @@ class Console:
                 return
             if self.busy:
                 raise ValueError('上一个操作尚未完成。')
-            if action not in {'probe', 'dmesg', 'replay', 'fetch_last'} and not self.identity_ok:
+            if action not in {'probe', 'dmesg', 'replay', 'fetch_last', 'save_sd'} and not self.identity_ok:
                 raise ValueError('先执行「检查板卡」，确认板型、内核和采集卡。')
             options = {} if options is None else options
             if not isinstance(options,dict):raise ValueError('操作参数必须是对象。')
@@ -331,7 +331,13 @@ class Console:
                 if type(options.get('dma_fast')) is not bool:
                     raise ValueError('dma_fast 必须是 true 或 false。')
                 self.driver_options = dict(dma_fast=options['dma_fast'])
-            if action in {'stream', 'replay'}:
+            if action == 'short_record':
+                short_seconds = options.get('seconds', 20)
+                storage = options.get('storage', 'ram_sd')
+                if type(short_seconds) is not int or not 1 <= short_seconds <= 60 or storage not in {'ram_sd', 'direct_sd'}:
+                    raise ValueError('短录时长必须为 1..60 秒，存储方式为 ram_sd 或 direct_sd。')
+                self.short_options = dict(seconds=short_seconds, storage=storage)
+            if action in {'stream', 'replay', 'short_record'}:
                 self.stream = {'channel': 'recorded-replay' if action == 'replay' else 'board', 'status': 'starting'}
                 self.stream_lines = ''
             self.busy = True
@@ -342,7 +348,7 @@ class Console:
     def _job(self, action):
         try:
             result = getattr(self, '_' + action)()
-            if self.cancel.is_set() and action not in {'stream', 'replay'}:
+            if self.cancel.is_set() and action not in {'stream', 'replay', 'short_record'}:
                 raise InterruptedError('已请求中断，请检查日志中的停止结果。')
             with self.lock:
                 self.job.update(status='success', message=result)
@@ -676,6 +682,48 @@ class Console:
         via = '网口' if self.net else f'USB 串口（压缩后 {gz_size:,} 字节）'
         return f"最新图像已回传并保存至 {local_file}（{size:,} 字节，经{via}）。"
 
+    def _save_sd(self):
+        """把板上内存最新的 .pgm 写入 SD 卡根目录，sync 并卸载，便于断电拔卡插回电脑读取。"""
+        rc, output = self.exchange(f"ls -t {BOARD_CAPTURES}/*.pgm 2>/dev/null | head -n 1", timeout=10)
+        lines = [l.strip() for l in output.strip().splitlines() if l.strip()]
+        target = lines[-1] if lines else ''
+        if rc or not target.startswith(BOARD_CAPTURES + '/'):
+            raise RuntimeError('板上内存里还没有已采集的 .pgm 图像。请先点击「单帧」采集。')
+        fname = Path(target).name
+        if not re.fullmatch(r'[A-Za-z0-9._-]+\.pgm', fname):
+            raise RuntimeError('板上图像文件名异常，已拒绝写入 SD 卡。')
+        self.run_checked(
+            f"mkdir -p {SD_MOUNT}; cd /; umount {SD_MOUNT} 2>/dev/null; umount /mnt/sd* 2>/dev/null; "
+            f"mount -t vfat /dev/mmcblk0p1 {SD_MOUNT}",
+            15,
+        )
+        try:
+            out = self.run_checked(
+                f"src_sz=$(wc -c < '{target}' | tr -d ' \\t') && test \"$src_sz\" -gt 0 && "
+                f"cp '{target}' '{SD_MOUNT}/{fname}' && sync && "
+                f"dst_sz=$(wc -c < '{SD_MOUNT}/{fname}' | tr -d ' \\t') && test \"$src_sz\" = \"$dst_sz\" && "
+                f"printf 'SAVED_SD_BYTES=%s\\n' \"$dst_sz\"",
+                45,
+            )
+        finally:
+            self.run_checked(f"cd /; sync; umount {SD_MOUNT}", allow_cancel=True)
+        m = re.search(r'SAVED_SD_BYTES=(\d+)', out)
+        if not m:
+            raise RuntimeError('写入 SD 卡后大小核对失败：' + out[-200:])
+        size = int(m.group(1))
+        with self.lock:
+            prev = dict(self.last_frame or {})
+            prev.update(
+                name=fname,
+                path=target,
+                size_bytes=size,
+                sd_saved=True,
+                sd_name=fname,
+                location='board-ram + sd-card + local-pc' if prev.get('local_path') else 'board-ram + sd-card',
+            )
+            self.last_frame = prev
+        return f"已写入 SD 卡根目录（{fname}，{size:,} 字节），并完成 sync 与卸载。可断电拔卡插回电脑，到「图像 → 打开 PGM…」查看。"
+
     def _capture(self):
         self.last_frame = None
         name = 'frame-' + datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:6] + '.pgm'
@@ -758,6 +806,151 @@ class Console:
             raise RuntimeError('连续接收未正常结束，请查看停止状态与原始日志。' + output[-300:])
         what = '候选检测（第一版算法，未对真值）' if processor == 'candidates' else '灰度统计（不是缺陷判定）'
         return '连续接收已结束，收到 ' + str(ended.get('received', '?')) + ' 块，处理 ' + str(ended.get('processed', '?')) + ' 块。处理方式：' + what + '。'
+
+    def _check_short_result(self, rc, output):
+        ended = self.stream.get('ended', {})
+        if (
+            rc
+            or self.stream.get('status') != 'ended'
+            or any(ended.get(k) != 0 for k in ('error', 'source_error', 'processing_error', 'output_error', 'stop_error'))
+            or int(ended.get('id_discontinuities', 0)) != 0
+            or int(ended.get('queue_full_events', 0)) != 0
+        ):
+            raise RuntimeError('短录未完整成功（可能发生丢块、队列满或写入错误），未保留残缺文件。' + output[-300:])
+        m = re.search(r'^SAVED_PGM width=(\d+) height=(\d+) bytes=(\d+) path=(\S+)', output.replace('\r', ''), re.M)
+        if not m:
+            raise RuntimeError('短录结束但未收到 SAVED_PGM 确认，请查看日志。' + output[-300:])
+        return dict(width=int(m.group(1)), height=int(m.group(2)), bytes=int(m.group(3)), path=m.group(4))
+
+    def _short_record(self):
+        """短录连续长图并写入 SD 卡，确保无块号跳变且完成 sync + 卸载。"""
+        seconds = self.short_options['seconds']
+        storage = self.short_options['storage']
+        version = self.run_checked(STREAM_APP + ' --version')
+        if STREAM_VERSION not in version:
+            raise RuntimeError('先执行「从 SD 加载程序」。')
+        help_out = self.run_checked(STREAM_APP + ' --help')
+        if '--save-pgm' not in help_out:
+            raise RuntimeError('板上 sg3000-stream 还是旧版（不支持 --save-pgm）。请用新版 dist/glass-capture 更新 SD 卡后再试。')
+
+        fname = 'short-' + datetime.now().strftime('%Y%m%d-%H%M%S') + '.pgm'
+        if storage == 'ram_sd':
+            space_out = self.run_checked(
+                f"mkdir -p {BOARD_CAPTURES}; "
+                f"printf 'TMP_DF='; (df -k /tmp 2>/dev/null || true) | awk 'NR>1 && NF>=4 {{v=$(NF-2)}} END{{print v+0}}'; "
+                f"printf 'MEM_AVAIL='; awk '/^MemAvailable:/{{print $2; ok=1; exit}} /^MemFree:/{{f=$2}} END{{if(!ok) print f+0}}' /proc/meminfo",
+                10,
+            )
+            clean_space = space_out.replace('\r', '')
+            tmp_m = re.search(r'^TMP_DF=(\d+)', clean_space, re.M)
+            mem_m = re.search(r'^MEM_AVAIL=(\d+)', clean_space, re.M)
+            tmp_df_kib = int(tmp_m.group(1)) if tmp_m else 0
+            mem_kib = int(mem_m.group(1)) if mem_m else 0
+            if mem_kib <= 0 and tmp_df_kib <= 0:
+                raise RuntimeError('无法读取板上可用内存与 /tmp 空间。')
+            candidates = []
+            if tmp_df_kib > 0:
+                candidates.append((tmp_df_kib - 256 * 1024) * 1024)
+            if mem_kib > 0:
+                candidates.append((mem_kib - 640 * 1024) * 1024)
+            usable_bytes = min(min(candidates), 4_200_000_000)
+            if usable_bytes < 64 * 1024 * 1024:
+                raise RuntimeError(f'板上可用内存不足安全短录（MEM_AVAIL={mem_kib // 1024} MiB, TMP_DF={tmp_df_kib // 1024} MiB）。')
+            avail_label = f"/tmp {tmp_df_kib // 1024} MiB / " if tmp_df_kib > 0 else "initramfs / "
+            self.event('system', f'短录先写板载 /tmp（{avail_label}可用内存 {mem_kib // 1024} MiB，本次上限 {usable_bytes // 1048576} MiB），录完再拷到 SD 卡。')
+            rec_path = f'{BOARD_CAPTURES}/{fname}'
+            command = (
+                f"{STREAM_APP} --source hardware --processor stats --seconds {seconds} "
+                f"--queue 3 --max-frame-mib 48 --block-policy strict --max-bytes {usable_bytes} "
+                f"--save-pgm {rec_path} --emit-ms 1000"
+            )
+            rc, output = self.exchange(command, seconds + 45)
+            saved = self._check_short_result(rc, output)
+            w, h, n = saved['width'], saved['height'], saved['bytes']
+            ended = self.stream.get('ended', {})
+            was_cancelled = bool(ended.get('cancelled'))
+            mounted = False
+            copy_timeout = max(120, n // 4_000_000 + 60)
+            try:
+                copy_msg = f'采集已成功（{w} × {h}），正在写入 SD 卡并 sync（{n / 1048576:.1f} MB，约需 1–2 分钟，请勿断电或点停止）…'
+                with self.lock:
+                    if self.job:
+                        self.job['message'] = copy_msg
+                self.event('system', copy_msg)
+                self.run_checked(
+                    f"mkdir -p {SD_MOUNT}; cd /; umount {SD_MOUNT} 2>/dev/null; umount /mnt/sd* 2>/dev/null; mount -t vfat /dev/mmcblk0p1 {SD_MOUNT}",
+                    15,
+                    allow_cancel=was_cancelled,
+                )
+                mounted = True
+                sd_df = self.run_checked(
+                    f"df -k {SD_MOUNT} 2>/dev/null | awk 'NR>1 && NF>=4 {{v=$(NF-2)}} END{{print v+0}}'",
+                    10,
+                    allow_cancel=was_cancelled,
+                )
+                sd_m = re.search(r'(\d+)', sd_df)
+                if sd_m and int(sd_m.group(1)) > 0 and int(sd_m.group(1)) * 1024 < n + 16 * 1024 * 1024:
+                    raise RuntimeError('SD 卡剩余空间不足，无法写入短录长图。')
+                cp_out = self.run_checked(
+                    f"cp '{rec_path}' '{SD_MOUNT}/{fname}' && sync && printf 'SAVED_SD_BYTES=' && wc -c < '{SD_MOUNT}/{fname}'",
+                    copy_timeout,
+                    allow_cancel=was_cancelled,
+                )
+                sd_bytes = re.search(r'SAVED_SD_BYTES=(\d+)', cp_out)
+                if not sd_bytes or int(sd_bytes.group(1)) != n:
+                    raise RuntimeError('SD 卡写入后的文件字节数与板载内存不一致，请检查日志并确认勿拔卡。')
+                self.exchange(f"rm -f '{rec_path}'", 15, allow_cancel=was_cancelled)
+            finally:
+                if mounted:
+                    self.exchange(f"cd /; sync; umount {SD_MOUNT}", 120, allow_cancel=True)
+        else:
+            mounted = False
+            rec_path = f'{SD_MOUNT}/{fname}'
+            try:
+                self.run_checked(
+                    f"mkdir -p {SD_MOUNT}; cd /; umount {SD_MOUNT} 2>/dev/null; umount /mnt/sd* 2>/dev/null; mount -t vfat /dev/mmcblk0p1 {SD_MOUNT}",
+                    15,
+                )
+                mounted = True
+                sd_df = self.run_checked(
+                    f"df -k {SD_MOUNT} 2>/dev/null | awk 'NR>1 && NF>=4 {{v=$(NF-2)}} END{{print v+0}}'",
+                    10,
+                )
+                sd_m = re.search(r'(\d+)', sd_df)
+                if not sd_m or int(sd_m.group(1)) <= 0:
+                    raise RuntimeError('无法读取 SD 卡剩余空间。')
+                avail_kib = int(sd_m.group(1))
+                usable_bytes = min((avail_kib - 64 * 1024) * 1024, 4_200_000_000)
+                if usable_bytes < 64 * 1024 * 1024:
+                    raise RuntimeError(f'SD 卡可用空间仅 {avail_kib // 1024} MiB，不足写入。')
+                self.event('system', f'低速直写 SD 卡（可用 {avail_kib // 1024} MiB，字节上限 {usable_bytes // 1048576} MiB）；若行频过高会立刻报错停机不丢块。')
+                command = (
+                    f"{STREAM_APP} --source hardware --processor stats --seconds {seconds} "
+                    f"--queue 4 --max-frame-mib 48 --block-policy strict --max-bytes {usable_bytes} "
+                    f"--save-pgm {rec_path} --emit-ms 1000"
+                )
+                rc, output = self.exchange(command, seconds + 60)
+                saved = self._check_short_result(rc, output)
+                w, h, n = saved['width'], saved['height'], saved['bytes']
+            finally:
+                if mounted:
+                    self.exchange(f"cd /; sync; umount {SD_MOUNT}", 60, allow_cancel=True)
+
+        ended = self.stream.get('ended', {})
+        with self.lock:
+            self.last_frame = dict(
+                name=fname,
+                path=fname,
+                location='sd-card',
+                size_bytes=n,
+                at=datetime.now().isoformat(timespec='seconds'),
+                width=w,
+                height=h,
+                sd_saved=True,
+                sd_name=fname,
+            )
+        note = '（提前停止）' if ended.get('cancelled') else ''
+        return f"短录{note}并写入 SD 卡完成：{fname}（{w} × {h}，{n / 1048576:.1f} MB），已 sync 并卸载；断电拔卡后到「采集 → 图像 → 打开 PGM…」查看。"
 
     # ==== 网口 ==========================================================
 
