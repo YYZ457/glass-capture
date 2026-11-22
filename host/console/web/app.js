@@ -276,11 +276,23 @@ function buildFlow(s) {
   const fast = s.driver?.dma_fast === 'Y', ended = s.stream?.ended;
   const rate = ended && Number(ended.elapsed_ms) > 0 && s.stream.channel === 'board' ? Number(ended.bytes) / 1e6 / (Number(ended.elapsed_ms) / 1000) : null;
   const liveBtn = [liveOn ? '■ 停止实时' : '▶ 开始实时', toggleLive, liveOn ? !stopRequested : ready, !liveOn];
+  // 调亮度时容易踩的坑：图不是全宽、靠数字增益硬拉、开着平场校正调光、曝光超出 15 kHz 能用的范围
+  const cardWidth = s.checks?.card?.CameraWidth, narrow = (live.width && live.width !== 16384) || (cardWidth && cardWidth !== 16384);
+  const gain = params.DigitalGain?.value, shift = params.DigitalShift?.raw, exposure = params.ExposureTime?.value;
+  const brightWarn = [
+    narrow ? `图只有 ${live.width || cardWidth} 宽：采集卡没切到 16384，看到的只是一部分视场。先回第 1 步补做「单线模式」。` : '',
+    gain > 2 ? `数字增益 ${gain.toFixed(1)}× 太大：它只把噪声一起放大。改回 1，亮度靠光源、光圈、曝光；不够再用数字位移。` : '',
+    shift >= 3 ? `数字位移 ×${2 ** shift}：信号本身很弱，说明光不够。` : '',
+    ffcOn ? '平场校正开着：它会把光照不均“修平”，看不出光源本身的问题。调亮度时先关掉，光源定了再重做校正。' : '',
+    exposure > 66 ? `曝光 ${exposure.toFixed(0)} µs：最终 15 kHz 时一行只有 66.7 µs，曝光最多约 66 µs。现在调出来的亮度到时会掉到 ${Math.round(66 / exposure * 100)}% 左右。` : '',
+  ].filter(Boolean);
+  if (pattern) brightWarn.unshift('测试图还开着：先在「验证链路」里关掉。');
   return [
     {id: 'connect', title: '连接与初始化', done: initDone, status: initDone ? '已就绪' : s.connected ? `已连接 · ${nInit} / ${steps.length}` : '未连接',
      text: '板子上电、Linux 启动完（约 30 秒），J83 的 USB 线接电脑。选串口连接后会自动完成：唤醒终端、检查板卡、加载程序与驱动、采集卡体检、切单线模式、读取相机参数。',
      actions: s.connected ? [['一键初始化', runInit, idle && !initDone, true], ['查看初始化清单', () => togglePop('device-pop'), true, false]]
-                          : [['选择串口并连接…', () => togglePop('device-pop'), true, true]]},
+                          : [['选择串口并连接…', () => togglePop('device-pop'), true, true]],
+     note: narrow ? `现在的图只有 ${live.width || cardWidth} 宽（应为 16384）：「单线模式」这一项没做完。点「一键初始化」补上。` : ''},
     {id: 'link', title: '验证链路', done: flowMemo.link === 'ok' && pattern === 0, warn: flowMemo.link === 'bad',
      status: flowMemo.link === 'ok' ? (pattern ? '已验证 · 记得关闭测试图' : '8 个位齐全') : flowMemo.link === 'bad' ? '有位没出现' : '未验证',
      text: '让相机输出它自己生成的渐变图。线轮廓是整齐的锯齿、下方「位」7–0 八格全亮，就说明相机 → 采集卡 → 板子这一路没丢位。',
@@ -288,11 +300,11 @@ function buildFlow(s) {
                ['② 采一帧', () => act('snap', {fetch: false}), ready && pattern === 3, pattern === 3],
                ['③ 关闭测试图（回到实拍）', () => setCam('TestPattern', 0), canSet('TestPattern') && pattern !== undefined && pattern !== 0, pattern !== 0 && !!flowMemo.link, pattern === 0 && !!flowMemo.link]],
      note: flowMemo.link === 'bad' ? `测试图下仍缺位：${flowMemo.missing}。把日志（状态栏「日志」→ 导出）发给 Claude。` : ''},
-    {id: 'bright', title: '调亮度', done: !!flowMemo.bright, warn: false,
+    {id: 'bright', title: '调亮度', done: !!flowMemo.bright && !narrow && !(gain > 2), warn: brightWarn.length > 0 && !!st,
      status: st && pattern === 0 ? `P50 ${st.p50} · 饱和 ${st.saturated.toLocaleString()}` : '未采实拍图',
      text: '开始实时后，先加光源、开大光圈；再在右侧「采集」里调曝光时间、数字位移（×2 = 亮一倍），改完按回车，下一帧就能看到。目标：P50 在 150–200，饱和为 0。',
      actions: [liveBtn, ['定位到相机参数', () => reveal('imaging'), true, false]],
-     note: pattern ? '测试图还开着：先在「验证链路」里关掉。' : ''},
+     note: brightWarn.join('\n')},
     {id: 'focus', title: '对焦与调平', done: !!flowMemo.focus,
      status: edge && pattern === 0 ? `边缘宽度 ${edge.width_px.toFixed(2)} px` : '未测',
      text: '放一条和扫描线垂直的黑白直边（黑胶带、刀片）。实时中慢慢拧对焦环，看下方「锐度趋势」升到顶再回落，拧回顶点；边缘宽度 ≤ 2 px 时变绿。再换横跨视场的刻度尺：8 段锐度一样高 = 相机与玻璃平行。最后把焦点推到玻璃厚度中间（1 mm 玻璃约 0.33 mm）。',
@@ -300,7 +312,8 @@ function buildFlow(s) {
     {id: 'ffc', title: '平场校正', done: ffcOn && ffcSet > 0, status: ffcOn ? `已启用 · 用户 ${ffcSet}` : ffcSet > 0 ? `已选用户 ${ffcSet} · 未启用` : '未做',
      text: '镜头、光源、行频、曝光都定下来以后再做。右侧「平场校正」：盖上镜头盖 → 暗场校正；拿掉镜头盖、光源均匀照满、不放玻璃 → 亮场校正；最后打开「启用」。结果不保存，断电后要重做。',
      actions: [['① 选用户组 1（出厂组不能校正）', () => setCam('FFCUserSetSelector', 1), ready && ffcSet === 0, ffcSet === 0, ffcSet > 0],
-               ['② 打开平场校正面板', () => reveal('ffc'), true, ffcSet > 0 && !ffcOn]]},
+               ['② 打开平场校正面板', () => reveal('ffc'), true, ffcSet > 0 && !ffcOn]],
+     note: ffcOn && !flowMemo.bright ? '亮度还没调好就做了校正：之后改了光源、光圈、曝光、增益或行频，都要关掉重做。' : ''},
     {id: 'run', title: '连续运行', done: rate !== null && rate >= 240 && Number(ended.id_discontinuities) === 0,
      status: rate !== null ? `${rate.toFixed(0)} MB/s` : '未运行',
      text: '15 kHz × 16384 需要 246 MB/s 不丢块。先把驱动切到快速 DMA，再到「连续运行」开始 30 秒，看吞吐、块号是否连续、有没有队列满。',

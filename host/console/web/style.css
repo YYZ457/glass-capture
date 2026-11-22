@@ -264,7 +264,7 @@ body:not([data-view="acquire"]) :is(#snap, #live-start, #fetch, .tool-sep) { dis
 .flow-actions { display: grid; gap: 6px; }
 .flow-actions .btn { justify-content: flex-start; }
 .flow-actions .btn.ok { color: var(--ok); }
-.flow-note { font-size: 11.5px; line-height: 1.5; color: var(--warn); }
+.flow-note { font-size: 11.5px; line-height: 1.55; color: var(--warn); white-space: pre-line; }
 .guide-foot { margin-top: auto; padding: 8px 10px; display: flex; justify-content: space-between; border-top: 1px solid var(--line); }
 .group.flash { animation: flash 1.6s ease-out; }
 @keyframes flash { 0%, 35% { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); } 100% { background: transparent; box-shadow: none; } }
