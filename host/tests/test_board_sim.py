@@ -469,6 +469,32 @@ def test_camera_page_snapshot_live_driver_bench(board, monkeypatch):
     assert {"camera", "live", "bench", "driver"} <= set(state) and state["live"]["profile"]["width"] == 16384
 
 
+def test_live_accepts_brightness_changes_between_frames(board, monkeypatch):
+    """实时调试时改曝光 / 数字位移：排队，下一帧前写入；改输出模式或做平场校正要先停。"""
+    console, tmp = board
+    _use_sim_tool(tmp, monkeypatch)
+    assert run(console, "camera_preset")["status"] == "success"
+    console.start("live", {"count": 3})
+    deadline = time.monotonic() + 60
+    while not console.live.get("running") and time.monotonic() < deadline:
+        time.sleep(.02)
+    console.start("camera_set", {"name": "ExposureTime", "value": 70})        # 不报"上一个操作尚未完成"
+    console.start("camera_set", {"name": "DigitalShift", "value": 1})
+    assert console.state()["live"]["pending"] or console.live.get("last_set")
+    for bad in ({"name": "ClConfiguration", "value": 3}, {"name": "FFCCalFPN", "value": 1}):
+        with pytest.raises(ValueError):
+            console.start("camera_set", bad)
+    deadline = time.monotonic() + 120
+    while console.busy and time.monotonic() < deadline:
+        time.sleep(.05)
+    assert console.job["action"] == "live" and console.job["status"] == "success", console.job
+    params = console.camera["params"]
+    assert params["ExposureTime"]["value"] == 70.0 and params["DigitalShift"]["raw"] == 1
+    assert console.live["last_set"]["ok"] and console.state()["live"]["pending"] == []
+    with pytest.raises(ValueError):
+        console.start("camera_set", {"name": "ExposureTime", "value": 1e9})   # 范围检查照旧
+
+
 def test_web_page_references_existing_elements():
     """网页脚本里用到的每个元素 id 在 index.html 里都有；页面不含内联样式（内容安全策略会拦）。"""
     import re

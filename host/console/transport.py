@@ -97,6 +97,7 @@ class Console:
         self.camera = {}              # 相机参数（camera-get / camera-set --params 读回的），名字 → dict
         self.live = {}                # 最近一次"采一帧看轮廓"的结果 + 历史
         self.live_stop = False
+        self.live_sets = []           # 实时调试时排队的相机参数修改（两帧之间执行）
         self.bench = []               # sg3000-capture bench 的结果
         self.driver = {}              # cam_serial / dma_fast 当前值
         self.log_path = self.runtime / ('session-' + datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:8] + '.jsonl')
@@ -120,7 +121,7 @@ class Console:
                         identity_ok=self.identity_ok, busy=self.busy, job=self.job,
                         checks=dict(self.checks), last_frame=self.last_frame, seq=self.seq,
                         stream=dict(self.stream), net=dict(self.net), captures=str(CAPTURES),
-                        camera=self.camera, live=self.live, bench=self.bench, driver=self.driver,
+                        camera=self.camera, live=dict(self.live, pending=[o['name'] for o in self.live_sets]), bench=self.bench, driver=self.driver,
                         events=[e for e in self.events if e['seq'] > after]))
 
     def _stream_unknown(self, message):
@@ -296,6 +297,13 @@ class Console:
         with self.lock:
             if action != 'replay' and (not self.connected or not self.shell_ready):
                 raise ValueError('先连接并唤醒 Linux root 终端；如出现登录界面，请先用串口工具登录。')
+            if self.busy and action == 'camera_set' and self.job and self.job.get('action') == 'live' and self.live.get('running'):
+                o = self._check_camera_set(options if isinstance(options, dict) else {})
+                if o['name'] not in self.LIVE_ADJUSTABLE:
+                    raise ValueError(f"实时调试时只能改曝光、行频、数字位移、增益、黑电平、TDI 和测试图；{o['name']} 要先停止实时调试。")
+                self.live_sets = [x for x in self.live_sets if x['name'] != o['name']] + [o]   # 同一参数只留最新值
+                self.event('system', f"实时调试中：{o['name']} = {o['text']} 已排队，下一帧开始前写入相机。")
+                return
             if self.busy:
                 raise ValueError('上一个操作尚未完成。')
             if action not in {'probe', 'dmesg', 'replay', 'fetch_last'} and not self.identity_ok:
@@ -785,6 +793,8 @@ class Console:
                        # 命令：值只能是 1。永远没有 UserSetSave / FFCUserSetSave。
                        'FFCCalFPN': (1,), 'FFCCalPRNU': (1,), 'FFCUserSetLoad': (1,)}
     CAMERA_COMMANDS = ('FFCCalFPN', 'FFCCalPRNU', 'FFCUserSetLoad')
+    # 实时调试时可以边看边改的参数（都不改变图像尺寸和输出模式）。
+    LIVE_ADJUSTABLE = ('ExposureTime', 'LineRate', 'DigitalShift', 'DigitalGain', 'AnalogGain', 'BlackLevel', 'TDIStage', 'TDIMode', 'TestPattern')
     CAMERA_SET_FLOATS = {'ExposureTime': (0.0, 100000.0), 'DigitalGain': (0.10, 15.99), 'LineRate': (100.0, 200000.0)}
 
     @classmethod
@@ -941,7 +951,7 @@ class Console:
             history.append(dict(at=now, sharpness=focus.get('sharpness'), mean=data['stats']['mean'], max=data['stats']['max'],
                                 edge_width=(focus.get('edge') or {}).get('width_px')))
             self.live = dict(data, name=name, at=now, count=self.live.get('count', 0) + 1, history=history,
-                             running=self.live.get('running', False))
+                             running=self.live.get('running', False), last_set=self.live.get('last_set'))
         return path, data
 
     @staticmethod
@@ -982,6 +992,7 @@ class Console:
             self.live = dict(self.live, running=True)
         try:
             while not self.live_stop and not self.cancel.is_set() and (not limit or done < limit):
+                self._apply_live_sets()
                 path, _ = self._snap_once(f"live-{datetime.now().strftime('%H%M%S')}-{done:04d}.pgm")
                 if previous:
                     self.exchange(f"rm -f {previous}", 10)        # 只留最新一帧，免得占满板上内存
@@ -989,7 +1000,27 @@ class Console:
         finally:
             with self.lock:
                 self.live = dict(self.live, running=False)
+                dropped, self.live_sets = self.live_sets, []
+            if dropped:
+                self.event('system', '实时调试已停止，未写入的修改作废：' + '、'.join(o['name'] for o in dropped))
         return f'实时调试结束，共 {done} 帧。最后一帧留在板上，可以「保存到电脑」。'
+
+    def _apply_live_sets(self):
+        """实时调试两帧之间：把排队的相机参数依次写入。写失败只记下原因，不中断实时调试。"""
+        while True:
+            with self.lock:
+                if not self.live_sets:
+                    return
+                o = self.live_sets.pop(0)
+            self.camera_set_options = o
+            try:
+                message, ok = self._camera_set(), True
+            except Exception as exc:
+                message, ok = str(exc), False
+            with self.lock:
+                self.live = dict(self.live, last_set=dict(name=o['name'], value=o['text'], ok=ok, message=message,
+                                                          at=datetime.now().isoformat(timespec='seconds')))
+            self.event('result' if ok else 'error', message)
 
     def _driver(self):
         """重新加载驱动，选择 DMA 模式（dma_fast=1：1 MiB 缓存缓冲区；否则 64 KiB 旧模式）。相机串口一并放开。"""

@@ -100,6 +100,11 @@ const CAM_INFO = [
   ['FFCEnable', '平场校正', p => p.raw ? '开' : '关'], ['Temperature', '温度', p => `${p.value?.toFixed(1)} ℃`],
 ];
 function camParam(name) { return latest.camera?.params?.[name]; }
+/* 和 transport.py 的 LIVE_ADJUSTABLE 一致：实时调试时可以边看边改（两帧之间写入）。 */
+const LIVE_ADJUSTABLE = ['ExposureTime', 'LineRate', 'DigitalShift', 'DigitalGain', 'AnalogGain', 'BlackLevel', 'TDIStage', 'TDIMode', 'TestPattern'];
+const isLive = (s = latest) => !!s.live?.running || !!(s.busy && s.job?.action === 'live' && s.job.status === 'running');
+function canSet(name) { return uiReady() || (isLive() && !stopRequested && LIVE_ADJUSTABLE.includes(name)); }
+const setCam = (name, value) => act('camera_set', {name, value});
 function currentValue(spec, p) { return !p || p.raw === undefined ? undefined : spec.kind === 'enum' ? p.raw : spec.kind === 'int' ? (p.value ?? p.raw) : p.value; }
 function buildCameraRows() {
   for (const spec of CAM_PARAMS) {
@@ -115,22 +120,25 @@ function buildCameraRows() {
     ctl.append(input); if (spec.unit) ctl.append(el('span', 'unit', spec.unit)); ctl.append(lock);
     row.append(label, ctl); $('cam-' + spec.group).append(row);
     input.addEventListener('change', () => commitParam(spec));
+    input.addEventListener('input', () => row.classList.add('dirty'));
+    input.addEventListener('blur', () => setTimeout(() => row.classList.remove('dirty'), 0));
     Object.assign(spec, {row, note, input, lock});
   }
 }
-function revertParam(spec) { const v = currentValue(spec, camParam(spec.name)); spec.input.value = v === undefined ? '' : v; }
+function revertParam(spec) { const v = currentValue(spec, camParam(spec.name)); spec.input.value = v === undefined ? '' : v; spec.row.classList.remove('dirty', 'pending'); }
 function commitParam(spec) {
   const p = camParam(spec.name), raw = spec.input.value;
   let value = Number(raw);
-  if (!uiReady()) { revertParam(spec); return toast('设备忙或未就绪，未写入。', true); }
+  if (!canSet(spec.name)) { revertParam(spec); return toast(isLive() ? `实时采集中不能改${spec.label}，先停止实时。` : '设备忙或未就绪，未写入。', true); }
   if (raw === '' || !Number.isFinite(value)) { revertParam(spec); return toast('请输入数值。', true); }
   if (spec.kind !== 'float') value = Math.round(value);
   const now = currentValue(spec, p);
   if (now !== undefined && Math.abs(value - now) < 1e-9) return;
   const min = p?.min ?? spec.min, max = p?.max ?? spec.max;
   if (min !== undefined && max !== undefined && (value < min || value > max)) { revertParam(spec); return toast(`${spec.label}超出范围 ${min} – ${max}。`, true); }
-  spec.row.classList.add('pending');
+  spec.row.classList.remove('dirty'); spec.row.classList.add('pending'); spec.pendingAt = latest.camera?.at || '';
   act('camera_set', {name: spec.name, value});
+  if (isLive()) toast(`${spec.label}将在下一帧前写入`);
 }
 function updateCamera(s, ready) {
   const cam = s.camera || {}, params = cam.params || {};
@@ -138,7 +146,7 @@ function updateCamera(s, ready) {
   if (changed('cam-info', cam.at || '')) $('cam-info').replaceChildren(...CAM_INFO.map(([name, label, show]) => {
     const p = params[name], cell = el('div'); cell.append(el('dt', '', label), el('dd', '', !p ? '—' : p.error !== undefined ? '读不出' : show(p, params))); return cell;
   }));
-  const settling = s.busy && s.job?.action === 'camera_set';
+  const queued = s.live?.pending || [];
   for (const spec of CAM_PARAMS) {
     const p = params[spec.name], locked = !!p?.locked;
     let note = '';
@@ -148,8 +156,8 @@ function updateCamera(s, ready) {
     spec.note.textContent = note;
     spec.row.classList.toggle('locked', locked); spec.lock.hidden = !locked;
     spec.lock.title = locked ? (spec.lockedHint || '相机当前锁定此项') : '';
-    spec.input.disabled = !ready || locked || !p;
-    if (!settling) spec.row.classList.remove('pending');
+    spec.input.disabled = !canSet(spec.name) || locked || !p;
+    if (spec.row.classList.contains('pending') && (cam.at !== spec.pendingAt || (!s.busy && !queued.includes(spec.name)))) spec.row.classList.remove('pending');
     if (document.activeElement !== spec.input && p && p.raw !== undefined && spec.shown !== cam.at) { revertParam(spec); spec.shown = cam.at; }
   }
   const pattern = params.TestPattern?.raw;
@@ -237,6 +245,98 @@ async function runInit() {
   finally { initRunning = false; update(latest); }
 }
 
+function toggleLive() {
+  if (isLive()) { stopRequested = true; update(latest); return post('live_stop'); }
+  return act('live', {});
+}
+
+/* ---------- 调试向导：按顺序走完上板调试，每一步的完成条件自动判断 ---------- */
+let flowMemo = {}, flowOpen = null;
+try { flowMemo = JSON.parse(sessionStorage.getItem('sg-flow') || '{}'); } catch {}
+function saveFlow() { try { sessionStorage.setItem('sg-flow', JSON.stringify(flowMemo)); } catch {} }
+function noteFrame(s) {      // 每来一帧，记下它对向导意味着什么（测试图下 8 位是否齐全、实拍亮度、边缘宽度）
+  const live = s.live || {}; if (!live.at || flowMemo.frameAt === live.at + live.count) return;
+  flowMemo.frameAt = live.at + live.count;
+  const pattern = s.camera?.params?.TestPattern?.raw, st = live.stats, seen = live.bits?.seen;
+  if (pattern === 3 && seen !== undefined) { flowMemo.link = seen === 0xff ? 'ok' : 'bad'; flowMemo.missing = live.bits.missing; }
+  if (pattern === 0 && st) flowMemo.bright = st.p50 >= 150 && st.p50 <= 200 && st.saturated <= 0.001 * live.width * live.height;
+  if (pattern === 0 && live.focus) flowMemo.focus = !!live.focus.edge && live.focus.edge.width_px <= 2;
+  saveFlow();
+}
+function reveal(group) {
+  const d = document.querySelector(`details.group[data-group="${group}"]`); if (!d) return;
+  d.open = true; d.scrollIntoView({block: 'nearest', behavior: 'smooth'});
+  d.classList.remove('flash'); void d.offsetWidth; d.classList.add('flash');
+}
+function buildFlow(s) {
+  const steps = buildSteps(s), initDone = steps.every(x => x.done), nInit = steps.filter(x => x.done).length;
+  const params = s.camera?.params || {}, pattern = params.TestPattern?.raw, live = s.live || {}, st = live.stats, edge = live.focus?.edge;
+  const ready = uiReady(), liveOn = isLive(s), idle = !s.busy && !initRunning;
+  const ffcOn = params.FFCEnable?.raw === 1, ffcSet = params.FFCUserSetSelector?.raw;
+  const fast = s.driver?.dma_fast === 'Y', ended = s.stream?.ended;
+  const rate = ended && Number(ended.elapsed_ms) > 0 && s.stream.channel === 'board' ? Number(ended.bytes) / 1e6 / (Number(ended.elapsed_ms) / 1000) : null;
+  const liveBtn = [liveOn ? '■ 停止实时' : '▶ 开始实时', toggleLive, liveOn ? !stopRequested : ready, !liveOn];
+  return [
+    {id: 'connect', title: '连接与初始化', done: initDone, status: initDone ? '已就绪' : s.connected ? `已连接 · ${nInit} / ${steps.length}` : '未连接',
+     text: '板子上电、Linux 启动完（约 30 秒），J83 的 USB 线接电脑。选串口连接后会自动完成：唤醒终端、检查板卡、加载程序与驱动、采集卡体检、切单线模式、读取相机参数。',
+     actions: s.connected ? [['一键初始化', runInit, idle && !initDone, true], ['查看初始化清单', () => togglePop('device-pop'), true, false]]
+                          : [['选择串口并连接…', () => togglePop('device-pop'), true, true]]},
+    {id: 'link', title: '验证链路', done: flowMemo.link === 'ok' && pattern === 0, warn: flowMemo.link === 'bad',
+     status: flowMemo.link === 'ok' ? (pattern ? '已验证 · 记得关闭测试图' : '8 个位齐全') : flowMemo.link === 'bad' ? '有位没出现' : '未验证',
+     text: '让相机输出它自己生成的渐变图。线轮廓是整齐的锯齿、下方「位」7–0 八格全亮，就说明相机 → 采集卡 → 板子这一路没丢位。',
+     actions: [['① 打开测试图（水平渐变）', () => setCam('TestPattern', 3), canSet('TestPattern') && pattern !== undefined && pattern !== 3, pattern !== 3 && flowMemo.link !== 'ok', pattern === 3],
+               ['② 采一帧', () => act('snap', {fetch: false}), ready && pattern === 3, pattern === 3],
+               ['③ 关闭测试图（回到实拍）', () => setCam('TestPattern', 0), canSet('TestPattern') && pattern !== undefined && pattern !== 0, pattern !== 0 && !!flowMemo.link, pattern === 0 && !!flowMemo.link]],
+     note: flowMemo.link === 'bad' ? `测试图下仍缺位：${flowMemo.missing}。把日志（状态栏「日志」→ 导出）发给 Claude。` : ''},
+    {id: 'bright', title: '调亮度', done: !!flowMemo.bright, warn: false,
+     status: st && pattern === 0 ? `P50 ${st.p50} · 饱和 ${st.saturated.toLocaleString()}` : '未采实拍图',
+     text: '开始实时后，先加光源、开大光圈；再在右侧「采集」里调曝光时间、数字位移（×2 = 亮一倍），改完按回车，下一帧就能看到。目标：P50 在 150–200，饱和为 0。',
+     actions: [liveBtn, ['定位到相机参数', () => reveal('imaging'), true, false]],
+     note: pattern ? '测试图还开着：先在「验证链路」里关掉。' : ''},
+    {id: 'focus', title: '对焦与调平', done: !!flowMemo.focus,
+     status: edge && pattern === 0 ? `边缘宽度 ${edge.width_px.toFixed(2)} px` : '未测',
+     text: '放一条和扫描线垂直的黑白直边（黑胶带、刀片）。实时中慢慢拧对焦环，看下方「锐度趋势」升到顶再回落，拧回顶点；边缘宽度 ≤ 2 px 时变绿。再换横跨视场的刻度尺：8 段锐度一样高 = 相机与玻璃平行。最后把焦点推到玻璃厚度中间（1 mm 玻璃约 0.33 mm）。',
+     actions: [liveBtn, ['清空锐度曲线（换靶标后）', () => post('live_clear'), true, false]]},
+    {id: 'ffc', title: '平场校正', done: ffcOn && ffcSet > 0, status: ffcOn ? `已启用 · 用户 ${ffcSet}` : ffcSet > 0 ? `已选用户 ${ffcSet} · 未启用` : '未做',
+     text: '镜头、光源、行频、曝光都定下来以后再做。右侧「平场校正」：盖上镜头盖 → 暗场校正；拿掉镜头盖、光源均匀照满、不放玻璃 → 亮场校正；最后打开「启用」。结果不保存，断电后要重做。',
+     actions: [['① 选用户组 1（出厂组不能校正）', () => setCam('FFCUserSetSelector', 1), ready && ffcSet === 0, ffcSet === 0, ffcSet > 0],
+               ['② 打开平场校正面板', () => reveal('ffc'), true, ffcSet > 0 && !ffcOn]]},
+    {id: 'run', title: '连续运行', done: rate !== null && rate >= 240 && Number(ended.id_discontinuities) === 0,
+     status: rate !== null ? `${rate.toFixed(0)} MB/s` : '未运行',
+     text: '15 kHz × 16384 需要 246 MB/s 不丢块。先把驱动切到快速 DMA，再到「连续运行」开始 30 秒，看吞吐、块号是否连续、有没有队列满。',
+     actions: [['① 切到快速 DMA…', () => openSettings('sec-driver'), true, !fast, fast], ['② 去「连续运行」', () => showView('run'), true, fast]]},
+  ];
+}
+function updateFlow(s) {
+  noteFrame(s);
+  const stages = buildFlow(s), current = stages.findIndex(x => !x.done), open = flowOpen ?? stages[current]?.id;
+  $('guide-progress').textContent = `${stages.filter(x => x.done).length} / ${stages.length}`;
+  if (!changed('flow', [open, current, stages.map(x => [x.done, x.warn, x.status, x.note, x.actions.map(a => [a[0], a[2], a[3], a[4]])])])) return;
+  $('flow').replaceChildren(...stages.map((x, i) => {
+    const li = el('li', [x.done ? 'done' : x.warn ? 'warn' : i === current ? 'current' : '', x.id === open ? 'open' : ''].join(' ').trim());
+    const head = el('button', 'flow-head'); head.type = 'button';
+    const text = el('div'); text.append(el('b', '', x.title), el('small', '', x.status));
+    head.append(el('span', 'mk', x.done ? '✓' : x.warn ? '!' : String(i + 1)), text);
+    head.onclick = () => { flowOpen = x.id === open ? '' : x.id; updateFlow(latest); };
+    li.append(head);
+    if (x.id === open) {
+      const body = el('div', 'flow-body'); body.append(el('p', '', x.text));
+      if (x.note) body.append(el('p', 'flow-note', x.note));
+      const actions = el('div', 'flow-actions');
+      for (const [label, fn, enabled, primary, ok] of x.actions) {
+        const b = el('button', 'btn sm' + (primary && enabled ? ' primary' : '') + (ok ? ' ok' : ''), (ok ? '✓ ' : '') + label);
+        b.disabled = !enabled; b.onclick = fn; actions.append(b);
+      }
+      body.append(actions); li.append(body);
+    }
+    return li;
+  }));
+}
+function setGuide(on) {
+  $('acquire').classList.toggle('with-guide', on); $('guide-toggle').setAttribute('aria-pressed', String(on));
+  store('sg-guide', on ? '1' : '0'); requestAnimationFrame(drawAll);
+}
+
 /* ---------- 图表 ---------- */
 function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
 function fitCanvas(canvas) {
@@ -298,7 +398,13 @@ function drawHistory() {
 function drawAll() { drawProfile(); drawHistory(); }
 
 function setRo(id, cls) { const e = $(id); e.className = 'ro' + (cls ? ' ' + cls : ''); }
+let lastSetKey = '';
 function updateAcquire(s, ready) {
+  const ls = s.live?.last_set;
+  if (ls && lastSetKey !== ls.at + ls.name + ls.value) {
+    const first = !lastSetKey; lastSetKey = ls.at + ls.name + ls.value;
+    if (!first && !ls.ok) { toast(`${ls.name} 没写成：${ls.message}`, true); const spec = CAM_PARAMS.find(p => p.name === ls.name); if (spec) revertParam(spec); }
+  }
   const live = s.live || {}, st = live.stats, focus = live.focus, running = !!live.running || (s.busy && s.job?.action === 'live');
   const pattern = s.camera?.params?.TestPattern?.raw;
   $('snap-at').textContent = live.at ? `#${live.count} · ${live.at.slice(11)} · ${live.width} × ${live.height}${running ? ' · 实时' : ''}${pattern ? ' · 测试图' : ''}` : '';
@@ -358,7 +464,8 @@ function update(s) {
   $('device-label').textContent = !s.connected ? '未连接' : `${s.port} · ${initialized ? '就绪' : s.shell_ready ? '未初始化' : '等待终端'}`;
   $('device-dot').className = 'dot' + (!s.connected ? '' : initialized ? ' ok' : ' warn');
   const liveRunning = !!s.live?.running || (running && job.action === 'live');
-  $('snap').disabled = !ready; $('live-start').disabled = !ready; $('live-start').classList.toggle('on', liveRunning);
+  $('snap').disabled = !ready; $('live-start').disabled = liveRunning ? stopRequested : !ready; $('live-start').classList.toggle('on', liveRunning);
+  $('live-start').title = liveRunning ? '再点一次停止实时采集' : '连续采图，每 2–4 秒刷新一次；采集中也能改曝光、数字位移等';
   $('stop').disabled = !running || stopRequested;
   $('stop').title = running ? (job.action === 'live' ? '停止实时采集（当前这一帧采完后结束）' : `中断：${ACTION_NAMES[job.action] || job.action}`) : '停止当前操作';
   $('fetch').disabled = !shell || s.busy || !s.last_frame;
@@ -401,7 +508,7 @@ function update(s) {
   $('stream-stop').disabled = !(running && job.action === 'stream') || stopRequested;
   $('replay').disabled = s.busy; $('stream-seconds').disabled = $('stream-processor').disabled = s.busy;
 
-  updateCamera(s, ready); updateAcquire(s, ready); updateStream(s); updateSystem(s, ready); updateImage(s);
+  updateCamera(s, ready); updateAcquire(s, ready); updateFlow(s); updateStream(s); updateSystem(s, ready); updateImage(s);
 
   // 日志
   for (const e of s.events) {
@@ -573,7 +680,7 @@ function bind() {
   $('init').onclick = runInit;
   // 工具栏
   $('snap').onclick = () => act('snap', {fetch: $('snap-fetch').checked});
-  $('live-start').onclick = () => act('live', {});
+  $('live-start').onclick = toggleLive;
   $('fetch').onclick = () => act('fetch_last');
   $('stop').onclick = async () => {
     const job = latest.job; if (!latest.busy || !job) return;
@@ -602,6 +709,12 @@ function bind() {
     const saved = recall('sg-group-' + d.dataset.group, null); if (saved !== null) d.open = saved === '1';
     d.addEventListener('toggle', () => store('sg-group-' + d.dataset.group, d.open ? '1' : '0'));
   });
+  // 向导
+  $('guide-toggle').onclick = () => setGuide(!$('acquire').classList.contains('with-guide'));
+  $('guide-close').onclick = () => setGuide(false);
+  $('guide-help').onclick = () => openSettings('sec-guide');
+  $('guide-reset').onclick = () => { flowMemo = {}; flowOpen = null; saveFlow(); signatures.delete('flow'); updateFlow(latest); };
+  if (recall('sg-guide', '1') === '0') setGuide(false);
   // 显示区
   $('focus-toggle').onclick = () => { const on = $('focus-toggle').getAttribute('aria-pressed') !== 'true'; $('focus-toggle').setAttribute('aria-pressed', String(on)); $('focus-dock').hidden = !on; store('sg-focus', on ? '1' : '0'); requestAnimationFrame(drawAll); };
   if (recall('sg-focus', '1') === '0') { $('focus-toggle').setAttribute('aria-pressed', 'false'); $('focus-dock').hidden = true; }

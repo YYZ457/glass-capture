@@ -70,7 +70,13 @@
   </div>
 
   <!-- ---------- 采集 ---------- -->
-  <section class="view active" id="acquire">
+  <section class="view active with-guide" id="acquire">
+    <aside class="guide" id="guide" aria-label="调试向导">
+      <div class="insp-head"><div><b>调试向导</b><span class="fine" id="guide-progress"></span></div>
+        <button class="btn icon" id="guide-close" title="收起向导（显示区右上角「向导」可再打开）">✕</button></div>
+      <ol class="flow" id="flow"></ol>
+      <div class="guide-foot"><button class="btn xs ghost" id="guide-help">完整操作指南</button><button class="btn xs ghost" id="guide-reset" title="清除本次记录的完成状态，从头再走一遍">重新开始</button></div>
+    </aside>
     <div class="stage">
       <div class="stage-bar">
         <div class="tabs" role="tablist">
@@ -79,6 +85,7 @@
         </div>
         <span class="stage-info" id="snap-at"></span>
         <span class="stage-info mono right" id="profile-readout"></span>
+        <button class="btn sm toggle" id="guide-toggle" aria-pressed="true" title="显示 / 隐藏左侧调试向导">向导</button>
         <button class="btn sm toggle" id="focus-toggle" aria-pressed="true" title="显示 / 隐藏对焦辅助">对焦辅助</button>
       </div>
 
@@ -137,7 +144,7 @@
 
       <details class="group" open data-group="imaging">
         <summary>采集</summary>
-        <div class="props" id="cam-imaging"></div>
+        <div class="props" id="cam-imaging"><p class="props-hint">改完按回车写入相机。实时采集中也能改，下一帧生效。</p></div>
       </details>
 
       <details class="group" data-group="ffc">
