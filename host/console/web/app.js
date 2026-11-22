@@ -252,14 +252,25 @@ function toggleLive() {
 
 /* ---------- 调试向导：按顺序走完上板调试，每一步的完成条件自动判断 ---------- */
 let flowMemo = {}, flowOpen = null;
-try { flowMemo = JSON.parse(sessionStorage.getItem('sg-flow') || '{}'); } catch {}
-function saveFlow() { try { sessionStorage.setItem('sg-flow', JSON.stringify(flowMemo)); } catch {} }
+try { flowMemo = JSON.parse(sessionStorage.getItem('sg-flow-2') || '{}'); } catch {}
+function saveFlow() { try { sessionStorage.setItem('sg-flow-2', JSON.stringify(flowMemo)); } catch {} }
+/* 整条线的均匀度：线轮廓（每段平均灰度）里最暗段 ÷ 最亮段，去掉两端各 2% 的段。
+ * 检测要覆盖整个视场（玻璃两边就在画面边上），所以只看中位数不够。 */
+const FLAT_OK = 0.6;
+function flatness(profile) {
+  if (!profile?.mean?.length) return null;
+  const n = profile.mean.length, cut = Math.floor(n * 0.02), mid = profile.mean.slice(cut, n - cut);
+  const hi = Math.max(...mid); return hi > 0 ? Math.min(...mid) / hi : null;
+}
 function noteFrame(s) {      // 每来一帧，记下它对向导意味着什么（测试图下 8 位是否齐全、实拍亮度、边缘宽度）
   const live = s.live || {}; if (!live.at || flowMemo.frameAt === live.at + live.count) return;
   flowMemo.frameAt = live.at + live.count;
   const pattern = s.camera?.params?.TestPattern?.raw, st = live.stats, seen = live.bits?.seen;
   if (pattern === 3 && seen !== undefined) { flowMemo.link = seen === 0xff ? 'ok' : 'bad'; flowMemo.missing = live.bits.missing; }
-  if (pattern === 0 && st) flowMemo.bright = st.p50 >= 150 && st.p50 <= 200 && st.saturated <= 0.001 * live.width * live.height;
+  const ffcOn = s.camera?.params?.FFCEnable?.raw === 1, flat = flatness(live.profile);
+  // 调亮度只认关着平场校正的图：开着时线轮廓是被校正"修平"的，看不出光源本身照得怎么样
+  if (pattern === 0 && st && !ffcOn) flowMemo.bright = st.p50 >= 150 && st.p50 <= 200 && st.saturated <= 0.001 * live.width * live.height
+    && live.width === 16384 && flat !== null && flat >= FLAT_OK;
   if (pattern === 0 && live.focus) flowMemo.focus = !!live.focus.edge && live.focus.edge.width_px <= 2;
   saveFlow();
 }
@@ -283,7 +294,8 @@ function buildFlow(s) {
     narrow ? `图只有 ${live.width || cardWidth} 宽：采集卡没切到 16384，看到的只是一部分视场。先回第 1 步补做「单线模式」。` : '',
     gain > 2 ? `数字增益 ${gain.toFixed(1)}× 太大：它只把噪声一起放大。改回 1，亮度靠光源、光圈、曝光；不够再用数字位移。` : '',
     shift >= 3 ? `数字位移 ×${2 ** shift}：信号本身很弱，说明光不够。` : '',
-    ffcOn ? '平场校正开着：它会把光照不均“修平”，看不出光源本身的问题。调亮度时先关掉，光源定了再重做校正。' : '',
+    ffcOn ? '平场校正开着：它会把光照不均“修平”，看不出光源本身的问题，这一步只认关掉校正时的图。先在右侧「平场校正」关掉「启用」，光源定了再重做校正。' : '',
+    st && flatness(live.profile) !== null && flatness(live.profile) < FLAT_OK ? `整条线不均匀：最暗处只有最亮处的 ${Math.round(flatness(live.profile) * 100)}%（要求 ≥ ${FLAT_OK * 100}%）。检测要覆盖整个视场，两端暗的地方颗粒检不出来；平场校正也补不回来（只是乘法，噪声一起放大）。先查是光源没照满还是镜头边缘暗：把光源左右挪一点，暗区跟着动就是光源，不动就是镜头。` : '',
     exposure > 66 ? `曝光 ${exposure.toFixed(0)} µs：最终 15 kHz 时一行只有 66.7 µs，曝光最多约 66 µs。现在调出来的亮度到时会掉到 ${Math.round(66 / exposure * 100)}% 左右。` : '',
   ].filter(Boolean);
   if (pattern) brightWarn.unshift('测试图还开着：先在「验证链路」里关掉。');
@@ -301,15 +313,15 @@ function buildFlow(s) {
                ['③ 关闭测试图（回到实拍）', () => setCam('TestPattern', 0), canSet('TestPattern') && pattern !== undefined && pattern !== 0, pattern !== 0 && !!flowMemo.link, pattern === 0 && !!flowMemo.link]],
      note: flowMemo.link === 'bad' ? `测试图下仍缺位：${flowMemo.missing}。把日志（状态栏「日志」→ 导出）发给 Claude。` : ''},
     {id: 'bright', title: '调亮度', done: !!flowMemo.bright && !narrow && !(gain > 2), warn: brightWarn.length > 0 && !!st,
-     status: st && pattern === 0 ? `P50 ${st.p50} · 饱和 ${st.saturated.toLocaleString()}` : '未采实拍图',
-     text: '开始实时后，先加光源、开大光圈；再在右侧「采集」里调曝光时间、数字位移（×2 = 亮一倍），改完按回车，下一帧就能看到。目标：P50 在 150–200，饱和为 0。',
+     status: st && pattern === 0 ? `P50 ${st.p50} · 饱和 ${st.saturated.toLocaleString()}${flatness(live.profile) !== null ? ` · 均匀度 ${Math.round(flatness(live.profile) * 100)}%` : ''}` : '未采实拍图',
+     text: '开始实时后，先加光源、开大光圈；再在右侧「采集」里调曝光时间、数字位移（×2 = 亮一倍），改完按回车，下一帧就能看到。目标：P50 在 150–200、饱和为 0，并且整条线大致平（最暗段 ≥ 最亮段的 60%）。这一步要在平场校正关着时判断。',
      actions: [liveBtn, ['定位到相机参数', () => reveal('imaging'), true, false]],
      note: brightWarn.join('\n')},
     {id: 'focus', title: '对焦与调平', done: !!flowMemo.focus,
      status: edge && pattern === 0 ? `边缘宽度 ${edge.width_px.toFixed(2)} px` : '未测',
      text: '放一条和扫描线垂直的黑白直边（黑胶带、刀片）。实时中慢慢拧对焦环，看下方「锐度趋势」升到顶再回落，拧回顶点；边缘宽度 ≤ 2 px 时变绿。再换横跨视场的刻度尺：8 段锐度一样高 = 相机与玻璃平行。最后把焦点推到玻璃厚度中间（1 mm 玻璃约 0.33 mm）。',
      actions: [liveBtn, ['清空锐度曲线（换靶标后）', () => post('live_clear'), true, false]]},
-    {id: 'ffc', title: '平场校正', done: ffcOn && ffcSet > 0, status: ffcOn ? `已启用 · 用户 ${ffcSet}` : ffcSet > 0 ? `已选用户 ${ffcSet} · 未启用` : '未做',
+    {id: 'ffc', title: '平场校正', done: ffcOn && ffcSet > 0 && !!flowMemo.bright, status: ffcOn ? `已启用 · 用户 ${ffcSet}` : ffcSet > 0 ? `已选用户 ${ffcSet} · 未启用` : '未做',
      text: '镜头、光源、行频、曝光都定下来以后再做。右侧「平场校正」：盖上镜头盖 → 暗场校正；拿掉镜头盖、光源均匀照满、不放玻璃 → 亮场校正；最后打开「启用」。结果不保存，断电后要重做。',
      actions: [['① 选用户组 1（出厂组不能校正）', () => setCam('FFCUserSetSelector', 1), ready && ffcSet === 0, ffcSet === 0, ffcSet > 0],
                ['② 打开平场校正面板', () => reveal('ffc'), true, ffcSet > 0 && !ffcOn]],
@@ -440,7 +452,9 @@ function updateAcquire(s, ready) {
   const seen = live.bits?.seen;
   if (changed('bits', String(seen))) $('bits').replaceChildren(...Array.from({length: 8}, (_, i) => el('i', seen !== undefined && (seen >> (7 - i) & 1) ? 'on' : '', String(7 - i))));
   $('bits-cell').title = seen === undefined ? '出现过的位（7 → 0）' : seen === 0xff ? '8 个位都出现过' : `没出现过的位：${live.bits.missing}。图暗时高位不亮是正常的；用测试图“水平渐变”判断链路`;
-  const advice = !st ? ['', ''] : st.saturated > 0.001 * live.width * live.height ? ['饱和过多：降低曝光、数字位移或光源亮度', 'warn']
+  const flat = flatness(live.profile);
+  const advice = !st ? ['', ''] : flat !== null && flat < FLAT_OK && st.p99 >= 60 ? [`整条线不均匀：最暗处只有最亮处的 ${Math.round(flat * 100)}%（光源没照满视场，或镜头边缘暗）`, 'warn']
+    : st.saturated > 0.001 * live.width * live.height ? ['饱和过多：降低曝光、数字位移或光源亮度', 'warn']
     : st.p99 < 60 ? ['画面很暗：先加光或开大光圈，再加曝光 / 数字位移 / TDI', 'warn']
     : st.p50 >= 150 && st.p50 <= 200 ? ['亮度合适', ''] : st.p50 > 200 ? ['偏亮，亮点余量小', 'warn'] : ['偏暗：背景建议 150–200', 'warn'];
   $('bright-advice').textContent = advice[0]; $('bright-advice').className = 'ro advice' + (advice[1] ? ' warn' : '');
