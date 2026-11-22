@@ -469,7 +469,7 @@ function updateAcquire(s, ready) {
 
 /* ---------- 主刷新 ---------- */
 const ACTION_NAMES = {probe: '检查板卡', prepare: '加载程序与驱动', status: '采集卡体检', preflight: '检查采集条件', capture: '采集', snap: '单帧采集',
-  live: '实时采集', fetch_last: '保存到电脑', dmesg: '读取内核日志', release: '卸载驱动', stream: '连续运行', replay: '离线回放', network: '配置网口',
+  live: '实时采集', fetch_last: '保存到电脑', save_sd: '存到 SD 卡', dmesg: '读取内核日志', release: '卸载驱动', stream: '连续运行', short_record: '短录存 SD', replay: '离线回放', network: '配置网口',
   card_xml: '导出采集卡 XML', card_set: '写采集卡参数', camera_probe: '读取相机型号', camera_xml: '导出相机 XML', camera_regs: '读取寄存器表',
   camera_set: '写相机参数', camera_get: '读取相机参数', camera_preset: '切换单线模式', board_session: '一键上板测试', driver: '重新加载驱动', bench: 'CPU 基准', prepare_stream: '加载连续程序'};
 function sb(id, cls, text, title = '') { const e = $(id); e.firstElementChild.className = 'dot' + (cls ? ' ' + cls : ''); e.lastElementChild.textContent = text; e.title = title; }
@@ -496,14 +496,16 @@ function update(s) {
   $('stop').disabled = !running || stopRequested;
   $('stop').title = running ? (job.action === 'live' ? '停止实时采集（当前这一帧采完后结束）' : `中断：${ACTION_NAMES[job.action] || job.action}`) : '停止当前操作';
   $('fetch').disabled = !shell || s.busy || !s.last_frame;
-  $('nav-run').hidden = !(running && job.action === 'stream');
+  $('save-sd').disabled = !shell || s.busy || !s.last_frame;
+  $('nav-run').hidden = !(running && (job.action === 'stream' || job.action === 'short_record'));
 
   // 状态栏：当前作业
   const box = $('sb-job');
   if (running) {
     box.className = 'sb-job running';
-    $('sb-job-text').textContent = job.action === 'live' ? (stopRequested ? '正在停止实时采集，等待当前帧完成…' : `实时采集中 · 第 ${s.live?.count ?? 0} 帧`) : `正在${ACTION_NAMES[job.action] || job.action}…`;
-    box.title = '';
+    $('sb-job-text').textContent = job.action === 'live' ? (stopRequested ? '正在停止实时采集，等待当前帧完成…' : `实时采集中 · 第 ${s.live?.count ?? 0} 帧`)
+      : (job.message && job.message !== '正在执行' ? job.message : `正在${ACTION_NAMES[job.action] || job.action}…`);
+    box.title = job.message || '';
   } else if (job) {
     const name = ACTION_NAMES[job.action] || job.action;
     box.className = 'sb-job ' + (job.status === 'error' ? 'error' : 'done');
@@ -531,11 +533,12 @@ function update(s) {
 
   // 通用按钮可用性
   document.querySelectorAll('[data-action]').forEach(b => { const basic = ['probe', 'dmesg', 'fetch_last'].includes(b.dataset.action); b.disabled = !shell || s.busy || initRunning || (!basic && !s.identity_ok); });
-  for (const id of ['net-setup', 'card-set', 'start-stream']) $(id).disabled = !ready;
-  $('stream-stop').disabled = !(running && job.action === 'stream') || stopRequested;
+  for (const id of ['net-setup', 'card-set', 'start-stream', 'start-short']) $(id).disabled = !ready;
+  $('stream-stop').disabled = !(running && (job.action === 'stream' || job.action === 'short_record')) || stopRequested;
   $('replay').disabled = s.busy; $('stream-seconds').disabled = $('stream-processor').disabled = s.busy;
+  $('short-seconds').disabled = $('short-mode').disabled = s.busy;
 
-  updateCamera(s, ready); updateAcquire(s, ready); updateFlow(s); updateStream(s); updateSystem(s, ready); updateImage(s);
+  updateCamera(s, ready); updateAcquire(s, ready); updateFlow(s); updateStream(s); updateShortHint(s); updateSystem(s, ready); updateImage(s);
 
   // 日志
   for (const e of s.events) {
@@ -595,12 +598,33 @@ function updateSystem(s, ready) {
   }));
 }
 
+function updateShortHint(s) {
+  const sec = Math.max(1, Math.min(60, Number($('short-seconds').value) || 20));
+  const mode = $('short-mode').value;
+  const width = s.checks?.card?.CameraWidth || 16384;
+  const rate = s.camera?.params?.LineRate?.value || s.checks?.card?.LineRateHz || 0;
+  if (!rate) {
+    $('short-hint').textContent = mode === 'direct_sd'
+      ? `极低速直写 SD 卡（不占 /tmp，上限 4 GB）；仅适合行频 ≤ 1500 Hz。`
+      : `先录进 /tmp 再拷回 SD 卡；按当前 /tmp 可用空间自动设字节上限，录满或到期安全停录。`;
+    return;
+  }
+  const mbps = (width * rate) / 1e6;
+  const totalMb = mbps * sec;
+  const warn = mode === 'direct_sd' && mbps > 25 ? ' · 注意：当前码率过高，直写 SD 极可能堵队列报错，建议改用「先录内存再存 SD」或降行频。'
+    : mode === 'ram_sd' && totalMb > 1300 ? ' · 体积接近 /tmp 内存盘上限，执行时会自动按板载剩余空间安全封顶。' : '';
+  $('short-hint').textContent = `当前 ${width} × ${Math.round(rate)} Hz ≈ ${mbps.toFixed(1)} MB/s，${sec} 秒约 ${(totalMb / 1024).toFixed(2)} GB${warn}`;
+}
+
 function updateImage(s) {
   const frame = s.last_frame;
   $('board-frame').hidden = !frame; $('view-latest-btn').disabled = !frame?.local_path;
   if (!frame) return;
   const mb = frame.size_bytes ? ` · ${(frame.size_bytes / 1048576).toFixed(1)} MB` : '';
-  $('board-frame').textContent = frame.local_path ? `电脑：${frame.local_path}${mb}` : `板上内存：${frame.path}${mb}（未保存到电脑，断电会丢）`;
+  const sd = frame.sd_saved ? ` · 已写 SD 卡（${frame.sd_name || frame.name}，已卸载可安全断电拔卡）` : '';
+  $('board-frame').textContent = frame.local_path ? `电脑：${frame.local_path}${mb}${sd}`
+    : frame.location === 'sd-card' ? `SD 卡：${frame.sd_name || frame.name}${mb}（已 sync 并卸载，可断电拔卡到「图像 → 打开 PGM…」查看）`
+    : `板上内存：${frame.path}${mb}${sd || '（未保存到电脑或 SD 卡，断电会丢）'}`;
   if (frame.local_path && displayedFrame !== frame.name) { displayedFrame = frame.name; loadCapturedPreview(frame); }
 }
 function loadCapturedPreview(frame) {
@@ -615,16 +639,70 @@ function loadCapturedPreview(frame) {
   img.onerror = () => { $('image-info').textContent = '预览读取失败：' + frame.name; };
   img.src = '/api/captures/preview?name=' + encodeURIComponent(frame.name) + '&t=' + Date.now();
 }
-function parsePGM(bytes) {
+function parsePGMHeader(bytes) {
   let i = 0; const space = c => [9, 10, 13, 32].includes(c);
-  function word() { while (i < bytes.length) { if (space(bytes[i])) { i++; continue; } if (bytes[i] === 35) { while (i < bytes.length && bytes[i] !== 10) i++; continue; } break; }
-    let out = ''; while (i < bytes.length && !space(bytes[i])) { if (out.length > 32) throw new Error('PGM 头部过长'); out += String.fromCharCode(bytes[i++]); } return out; }
+  function word() {
+    while (i < bytes.length) {
+      if (space(bytes[i])) { i++; continue; }
+      if (bytes[i] === 35) { while (i < bytes.length && bytes[i] !== 10) i++; continue; }
+      break;
+    }
+    let out = '';
+    while (i < bytes.length && !space(bytes[i])) {
+      if (out.length > 32) throw new Error('PGM 头部过长');
+      out += String.fromCharCode(bytes[i++]);
+    }
+    return out;
+  }
   if (word() !== 'P5') throw new Error('仅支持 P5 二进制灰度 PGM。');
   const w = Number(word()), h = Number(word()), max = Number(word());
-  if (!Number.isInteger(w) || !Number.isInteger(h) || w < 1 || h < 1 || w > 32768 || h > 32768 || w * h > 34000000 || max !== 255) throw new Error('需要 8 位 Mono8，不超过 3400 万像素，每边不超过 32768。');
-  if (!space(bytes[i])) throw new Error('PGM 头部缺少分隔符'); i++;
-  if (bytes.length - i !== w * h) throw new Error('像素长度与宽高不一致，可能是不完整的图。');
-  return {w, h, pixels: bytes.subarray(i)};
+  if (!Number.isInteger(w) || !Number.isInteger(h) || w < 1 || h < 1 || w > 65536 || max !== 255) {
+    throw new Error('需要 8 位 Mono8 P5 PGM（宽度 1–65536）。');
+  }
+  if (i >= bytes.length || !space(bytes[i])) throw new Error('PGM 头部缺少分隔符');
+  return {w, h, headerLen: i + 1};
+}
+function parsePGM(bytes) {
+  const {w, h, headerLen} = parsePGMHeader(bytes);
+  if (bytes.length - headerLen !== w * h) throw new Error('像素长度与宽高不一致，可能是不完整的图。');
+  return {w, h, pixels: bytes.subarray(headerLen)};
+}
+async function openLocalPGM(file) {
+  const head = new Uint8Array(await file.slice(0, 4096).arrayBuffer());
+  const {w, h, headerLen} = parsePGMHeader(head);
+  const actualPix = file.size - headerLen;
+  if (actualPix !== w * h) {
+    const actualRows = Math.max(0, Math.floor(actualPix / w));
+    throw new Error(`图像文件不完整：头部标称 ${w} × ${h}（需 ${(headerLen + w * h).toLocaleString()} 字节），实际仅 ${file.size.toLocaleString()} 字节（约 ${actualRows} 行，可能写入中途被停止或未等待 sync 完成）。`);
+  }
+  const scale = Math.min(1, 2048 / w, 8192 / h);
+  const dw = Math.max(1, Math.round(w * scale)), dh = Math.max(1, Math.round(h * scale));
+  const canvas = $('image'); canvas.width = dw; canvas.height = dh;
+  const ctx = canvas.getContext('2d'), imgData = ctx.createImageData(dw, dh);
+  const out = imgData.data;
+  const xMap = new Int32Array(dw);
+  for (let tx = 0; tx < dw; tx++) xMap[tx] = Math.min(w - 1, Math.floor(tx / scale));
+  const targetRows = new Int32Array(dh);
+  for (let ty = 0; ty < dh; ty++) targetRows[ty] = Math.min(h - 1, Math.floor(ty / scale));
+  const chunkRows = Math.max(1, Math.floor((16 * 1024 * 1024) / w));
+  let min = 255, max = 0, sum = 0, nextTy = 0;
+  for (let y0 = 0; y0 < h; y0 += chunkRows) {
+    const y1 = Math.min(h, y0 + chunkRows);
+    const buf = new Uint8Array(await file.slice(headerLen + y0 * w, headerLen + y1 * w).arrayBuffer());
+    for (let k = 0; k < buf.length; k++) { const v = buf[k]; if (v < min) min = v; if (v > max) max = v; sum += v; }
+    while (nextTy < dh && targetRows[nextTy] < y1) {
+      const rowOff = (targetRows[nextTy] - y0) * w;
+      let o = nextTy * dw * 4;
+      for (let tx = 0; tx < dw; tx++) {
+        const v = buf[rowOff + xMap[tx]];
+        out[o] = out[o + 1] = out[o + 2] = v; out[o + 3] = 255; o += 4;
+      }
+      nextTy++;
+    }
+    if (file.size > 64000000) $('image-info').textContent = `正在分块载入 ${file.name}… ${Math.round(100 * y1 / h)}%`;
+  }
+  ctx.putImageData(imgData, 0, 0); canvas.hidden = false; $('image-empty').hidden = true;
+  $('image-info').textContent = `${file.name} · ${w} × ${h}（${(file.size / 1048576).toFixed(1)} MB）· 最小 ${min} / 最大 ${max} / 平均 ${(sum / (w * h)).toFixed(1)}`;
 }
 
 /* ---------- 轮询 ---------- */
@@ -709,6 +787,11 @@ function bind() {
   $('snap').onclick = () => act('snap', {fetch: $('snap-fetch').checked});
   $('live-start').onclick = toggleLive;
   $('fetch').onclick = () => act('fetch_last');
+  $('save-sd').onclick = async () => {
+    if (!(await ask('写入 SD 卡并卸载？', '把板上内存最新一帧写入 SD 卡根目录并执行 sync + 卸载。\n完成后请先给板子断电再拔卡，插回电脑后点「图像 → 打开 PGM…」查看原图。', '写入 SD 卡'))) return;
+    try { await runJob('save_sd'); toast('已写入 SD 卡并安全卸载，可断电拔卡后到「图像 → 打开 PGM…」读取。'); }
+    catch (e) { if (!e.shown) toast(e.message, true); }
+  };
   $('stop').onclick = async () => {
     const job = latest.job; if (!latest.busy || !job) return;
     if (job.action === 'live') { stopRequested = true; update(latest); return post('live_stop'); }
@@ -751,18 +834,21 @@ function bind() {
   $('view-latest-btn').onclick = () => { if (latest.last_frame?.local_path) loadCapturedPreview(latest.last_frame); };
   $('pgm').onchange = async e => {
     try {
-      const file = e.target.files[0]; if (!file) return; if (file.size > 35000000) throw new Error('本地查看限制为 35 MB。');
-      const img = parsePGM(new Uint8Array(await file.arrayBuffer()));
-      const scale = Math.min(1, 2048 / img.w, 2048 / img.h), w = Math.max(1, Math.round(img.w * scale)), h = Math.max(1, Math.round(img.h * scale));
-      const canvas = $('image'); canvas.width = w; canvas.height = h; const ctx = canvas.getContext('2d'), data = ctx.createImageData(w, h); let min = 255, max = 0, sum = 0;
-      for (const v of img.pixels) { if (v < min) min = v; if (v > max) max = v; sum += v; }
-      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const v = img.pixels[Math.min(img.h - 1, Math.floor(y / scale)) * img.w + Math.min(img.w - 1, Math.floor(x / scale))], o = (y * w + x) * 4; data.data[o] = data.data[o + 1] = data.data[o + 2] = v; data.data[o + 3] = 255; }
-      ctx.putImageData(data, 0, 0); canvas.hidden = false; $('image-empty').hidden = true;
-      $('image-info').textContent = `${file.name} · ${img.w} × ${img.h} · 最小 ${min} / 最大 ${max} / 平均 ${(sum / img.pixels.length).toFixed(1)}`;
+      const file = e.target.files[0]; if (!file) return;
+      await openLocalPGM(file);
     } catch (err) { toast(err.message, true); } finally { e.target.value = ''; }
   };
-  // 连续运行
+  // 连续运行与短录
   $('start-stream').onclick = () => act('stream', {seconds: Number($('stream-seconds').value), processor: $('stream-processor').value});
+  $('short-seconds').oninput = $('short-mode').onchange = () => updateShortHint(latest);
+  $('start-short').onclick = async () => {
+    const sec = Math.round(Number($('short-seconds').value));
+    const storage = $('short-mode').value;
+    if (!Number.isInteger(sec) || sec < 1 || sec > 60) return toast('短录时长需为 1–60 秒。', true);
+    const modeName = storage === 'direct_sd' ? '低速直写 SD 卡' : '先录内存再拷 SD 卡';
+    if (!(await ask('开始短录长图并存 SD 卡？', `时长 ${sec} 秒，方式：${modeName}。\n${$('short-hint').textContent}\n期间若发生丢块会自动报错停机，不会保留残缺长图。`, '开始短录'))) return;
+    act('short_record', {seconds: sec, storage});
+  };
   $('replay').onclick = () => act('replay');
   $('run-dma-link').onclick = () => openSettings('sec-driver');
   // 设置

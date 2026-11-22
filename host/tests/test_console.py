@@ -62,8 +62,34 @@ class FakeSerial:
                 body = 'DDRInitialStatus=0, CameraLinkPixelClocks=0x00000001, CL=0, Color=0, Depth=8\nSaved complete Mono8 frame: 16 x 8, 128 bytes, block 1, 1 packets: /tmp/fake.pgm\n'
             elif wire.count('version') and ('capture version' in wire or 'stream --version' in wire):
                 body = 'sg3000-capture 1.0 ABI 1\n' if 'capture version' in wire else 'sg3000-stream 0.2 ABI 1\n'
+            elif 'stream --help' in wire:
+                body = 'sg3000-stream 0.2\n' if self.mode == 'old-stream' else 'sg3000-stream 0.2\n--save-pgm PATH --max-bytes 0\n'
+            elif 'MEM_AVAIL=' in wire:
+                if self.mode == 'low-tmp':
+                    body = 'TMP_DF=102400\nMEM_AVAIL=3800000\n'
+                elif self.mode == 'initramfs':
+                    body = 'TMP_DF=0\nMEM_AVAIL=3800000\n'
+                else:
+                    body = 'TMP_DF=2097152\nMEM_AVAIL=3800000\n'
+            elif 'df -k /mnt/sg3000-console' in wire:
+                body = '16777216\n'
+            elif '--save-pgm' in wire:
+                m = re.search(r'--save-pgm (\S+)', wire)
+                path = m.group(1) if m else '/tmp/short.pgm'
+                disc = '1' if self.mode == 'bad-continuity' else '0'
+                started = 'SGJSON {"schema":1,"event":"started","source":"hardware","processor":"stats","queue_depth":3,"max_frame_bytes":"50331648","continuity_verified":false}'
+                saved = f'SAVED_PGM width=16384 height=10000 bytes=163840027 path={path}'
+                ended = f'SGJSON {{"schema":1,"event":"ended","source":"hardware","processor":"stats","error":0,"source_error":0,"processing_error":0,"output_error":0,"stop_error":0,"cancelled":false,"received":"5","processed":"5","bytes":"163840000","id_discontinuities":"{disc}","queue_full_events":"0","queue_peak":1,"elapsed_ms":"1000"}}'
+                body = f'{started}\n{saved}\n{ended}\n' if disc == '0' else f'{started}\n{ended}\n'
             elif 'sha256sum' in wire and self.mode == 'bad-hash':
                 body, rc = 'sg3000-capture: FAILED\n', 1
+            elif 'ls -t /tmp/sg3000-console/*.pgm' in wire:
+                body = '' if self.mode == 'no-pgm' else '/tmp/sg3000-console/frame-test.pgm\n'
+            elif 'SAVED_SD_BYTES=' in wire:
+                if self.mode == 'bad-sd-copy':
+                    body, rc = 'cp: write error\n', 1
+                else:
+                    body = 'SAVED_SD_BYTES=163840027\n' if 'short-' in wire else 'SAVED_SD_BYTES=32768018\n'
             elif self.mode == 'no-marker':
                 self.queue.put((wire + '\r\n').encode())
                 continue
@@ -233,6 +259,88 @@ class ConsoleTests(unittest.TestCase):
             self.c.accept_stream_line(text, 'board')
         self.assertEqual(self.c.stream, {})
 
+    def test_save_sd_copies_verifies_and_always_unmounts(self):
+        self.connect()
+        self.c.port.mode = 'no-pgm'
+        self.assertEqual(self.job('save_sd')['status'], 'error')
+        self.assertNotIn('mount -t vfat /dev/mmcblk0p1', '\n'.join(self.c.port.commands))
+
+        self.c.port.mode = 'bad-sd-copy'
+        self.assertEqual(self.job('save_sd')['status'], 'error')
+        cmds_fail = '\n'.join(self.c.port.commands)
+        self.assertIn('umount /mnt/sg3000-console', cmds_fail)
+
+        self.c.port.commands.clear()
+        self.c.port.mode = 'ready'
+        self.assertEqual(self.job('save_sd')['status'], 'success')
+        cmds = '\n'.join(self.c.port.commands)
+        self.assertIn('mount -t vfat /dev/mmcblk0p1 /mnt/sg3000-console', cmds)
+        self.assertIn('SAVED_SD_BYTES=', cmds)
+        self.assertIn('sync; umount /mnt/sg3000-console', cmds)
+        self.assertTrue(self.c.last_frame['sd_saved'])
+        self.assertEqual(self.c.last_frame['sd_name'], 'frame-test.pgm')
+        self.assertEqual(self.c.last_frame['size_bytes'], 32768018)
+
+    def test_short_record_validates_copies_verifies_and_unmounts(self):
+        self.connect(); self.job('probe')
+        count = len(self.c.port.commands)
+        for bad in [{'seconds': 0}, {'seconds': 61}, {'seconds': True}, {'storage': 'usb'}]:
+            with self.assertRaises(ValueError):
+                self.c.start('short_record', bad)
+        self.assertEqual(len(self.c.port.commands), count)
+
+        def run_short(opts):
+            self.c.start('short_record', opts)
+            deadline = time.monotonic() + 4
+            while self.c.busy and time.monotonic() < deadline:
+                time.sleep(.01)
+            self.assertFalse(self.c.busy)
+            return self.c.job
+
+        self.c.port.mode = 'old-stream'
+        self.assertEqual(run_short({'seconds': 10, 'storage': 'ram_sd'})['status'], 'error')
+
+        self.c.port.mode = 'low-tmp'
+        self.assertEqual(run_short({'seconds': 20, 'storage': 'ram_sd'})['status'], 'error')
+
+        self.c.port.mode = 'bad-continuity'
+        self.c.port.commands.clear()
+        self.assertEqual(run_short({'seconds': 20, 'storage': 'ram_sd'})['status'], 'error')
+        self.assertNotIn('mount -t vfat /dev/mmcblk0p1', '\n'.join(self.c.port.commands))
+
+        self.c.port.mode = 'initramfs'
+        self.c.port.commands.clear()
+        self.assertEqual(run_short({'seconds': 20, 'storage': 'ram_sd'})['status'], 'success')
+
+        self.c.port.mode = 'ok'
+        self.c.port.commands.clear()
+        self.assertEqual(run_short({'seconds': 20, 'storage': 'ram_sd'})['status'], 'success')
+        cmds = '\n'.join(self.c.port.commands)
+        self.assertIn('--block-policy strict', cmds)
+        self.assertIn('--save-pgm /tmp/sg3000-console/short-', cmds)
+        self.assertIn('SAVED_SD_BYTES=', cmds)
+        self.assertIn('sync; umount /mnt/sg3000-console', cmds)
+        self.assertEqual(self.c.last_frame['width'], 16384)
+        self.assertEqual(self.c.last_frame['height'], 10000)
+        self.assertEqual(self.c.last_frame['location'], 'sd-card')
+        self.assertTrue(self.c.last_frame['sd_saved'])
+
+        self.c.port.mode = 'bad-continuity'
+        self.c.port.commands.clear()
+        self.assertEqual(run_short({'seconds': 10, 'storage': 'direct_sd'})['status'], 'error')
+        self.assertIn('sync; umount /mnt/sg3000-console', '\n'.join(self.c.port.commands))
+
+        self.c.port.mode = 'initramfs'
+        self.c.port.commands.clear()
+        self.assertEqual(run_short({'seconds': 20, 'storage': 'ram_sd'})['status'], 'success')
+
+        self.c.port.mode = 'ok'
+        self.c.port.commands.clear()
+        self.assertEqual(run_short({'seconds': 10, 'storage': 'direct_sd'})['status'], 'success')
+        cmds_dir = '\n'.join(self.c.port.commands)
+        self.assertIn('--save-pgm /mnt/sg3000-console/short-', cmds_dir)
+        self.assertIn('sync; umount /mnt/sg3000-console', cmds_dir)
+
 
 class HTTPTests(unittest.TestCase):
     def setUp(self):
@@ -249,7 +357,10 @@ class HTTPTests(unittest.TestCase):
 
     def test_static_source_and_no_path_traversal(self):
         with urllib.request.urlopen(self.url+'/') as r:
-            self.assertIn('采集中控台', r.read().decode())
+            html = r.read().decode()
+            self.assertIn('采集中控台', html)
+            self.assertIn('id="save-sd"', html)
+            self.assertIn('id="start-short"', html)
             self.assertIn("frame-ancestors 'none'", r.headers['Content-Security-Policy'])
         for key, (path, *_) in server.FILES.items():
             self.assertTrue((ROOT.parent/path).is_file(), path)
