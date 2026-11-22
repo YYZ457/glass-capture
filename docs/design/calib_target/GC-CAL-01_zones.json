@@ -1,0 +1,69 @@
+{
+ "name": "GC-CAL-01",
+ "version": "v1",
+ "width_mm": 80.0,
+ "length_mm": 105.0,
+ "thickness_mm": 1.0,
+ "edge_clear_mm": 1.5,
+ "focus_segment_mm": 10.0,
+ "focus_lp_per_mm": 40,
+ "coordinates": "板坐标 mm；铬面朝上；x 横跨视场，y 沿扫描方向；铬面朝下时 x -> 80 - x",
+ "zones": [
+  {
+   "code": "A",
+   "name": "引导空白",
+   "y0_mm": 0.0,
+   "y1_mm": 10.0
+  },
+  {
+   "code": "S",
+   "name": "静态调焦",
+   "y0_mm": 11.0,
+   "y1_mm": 29.0
+  },
+  {
+   "code": "B",
+   "name": "点阵尺",
+   "y0_mm": 31.0,
+   "y1_mm": 43.0
+  },
+  {
+   "code": "E",
+   "name": "颗粒点阵",
+   "y0_mm": 45.0,
+   "y1_mm": 85.0
+  },
+  {
+   "code": "J",
+   "name": "黑条与板号",
+   "y0_mm": 87.0,
+   "y1_mm": 94.0
+  },
+  {
+   "code": "T",
+   "name": "手持区",
+   "y0_mm": 95.0,
+   "y1_mm": 105.0
+  }
+ ],
+ "particle_sizes_um": [
+  2,
+  5,
+  8,
+  10,
+  15,
+  20,
+  30,
+  50
+ ],
+ "particles_per_size": 304,
+ "counts": {
+  "anchor": 64,
+  "black_bar": 1,
+  "focus_bar": 8,
+  "focus_lines": 8,
+  "grid": 846,
+  "orient_square": 1,
+  "particle": 2432
+ }
+}
